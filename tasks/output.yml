@@ -1,0 +1,92 @@
+---
+- name: Read generated certificate
+  ansible.builtin.slurp:
+    path: "{{ pg_node_ssl_cert_file }}"
+  register: pg_node_cert_slurp
+  when: pg_node_cert_pem is not defined
+
+- name: Set certificate content fact
+  ansible.builtin.set_fact:
+    pg_node_cert_pem: "{{ pg_node_cert_slurp.content | b64decode }}"
+  when: pg_node_cert_pem is not defined
+
+- name: Set registration status for output when registration is disabled
+  ansible.builtin.set_fact:
+    pasarguard_register_status_text: "disabled"
+  when: not pasarguard_register_node | bool
+
+- name: Set registration status for output when registration was enabled but no response exists
+  ansible.builtin.set_fact:
+    pasarguard_register_status_text: "enabled, but no register response was produced"
+  when:
+    - pasarguard_register_node | bool
+    - pasarguard_register_response is not defined
+    - pasarguard_register_status_text is not defined
+
+- name: Set registration status for output when node already exists
+  ansible.builtin.set_fact:
+    pasarguard_register_status_text: >-
+      already exists, http_status=409,
+      url={{ pasarguard_base_url_effective | default(pasarguard_base_url | regex_replace('/+$', '')) }}{{ pasarguard_node_register_path_effective | default(pasarguard_node_register_path) }}
+  when:
+    - pasarguard_register_response is defined
+    - pasarguard_register_response.status | default(0) | int == 409
+
+- name: Build readable node output text
+  ansible.builtin.set_fact:
+    pg_node_output_text: |
+      ============================================================
+      PasarGuard node installed
+      ============================================================
+
+      Host:            {{ inventory_hostname }}
+      Name:            {{ pg_node_name | default(inventory_hostname) }}
+      Address:         {{ pg_node_register_address_effective }}
+      Public IP:       {{ pg_node_public_ip_effective }}
+      Port:            {{ pg_node_service_port }}
+      Connection type: {{ pg_node_connection_type }}
+      Registration:    {{ pasarguard_register_status_text | default('unknown') }}
+
+      Files on server:
+        Compose:      {{ pg_node_app_dir }}/docker-compose.yml
+        Env:          {{ pg_node_app_dir }}/.env
+        Summary:      {{ pg_node_output_file }}
+        Certificate:  {{ pg_node_ssl_cert_file }}
+        Private key:  {{ pg_node_ssl_key_file }}
+
+      SAN used for certificate:
+      {% for dns_name in pg_node_cert_dns_effective %}
+        DNS: {{ dns_name }}
+      {% endfor %}
+      {% for ip_addr in pg_node_cert_ip_effective %}
+        IP:  {{ ip_addr }}
+      {% endfor %}
+
+      {% if pg_node_output_include_sensitive | bool %}
+      API_KEY:
+      {{ pg_node_api_key_effective }}
+
+      CERTIFICATE:
+      {{ pg_node_cert_pem | trim }}
+      {% else %}
+      API_KEY:
+      hidden
+
+      CERTIFICATE:
+      hidden
+      {% endif %}
+
+      ============================================================
+
+- name: Write readable install summary on server
+  ansible.builtin.copy:
+    dest: "{{ pg_node_output_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+    content: "{{ pg_node_output_text }}"
+  no_log: "{{ not pg_node_output_include_sensitive | bool }}"
+
+- name: Print readable node output
+  ansible.builtin.debug:
+    msg: "{{ pg_node_output_text }}"

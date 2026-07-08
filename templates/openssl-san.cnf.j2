@@ -1,0 +1,18 @@
+[req]
+distinguished_name = req_distinguished_name
+x509_extensions = v3_req
+prompt = no
+
+[req_distinguished_name]
+CN = {{ pg_node_cert_cn }}
+
+[v3_req]
+subjectAltName = @alt_names
+
+[alt_names]
+{% for dns_name in pg_node_cert_dns_effective %}
+DNS.{{ loop.index }} = {{ dns_name }}
+{% endfor %}
+{% for ip_addr in pg_node_cert_ip_effective %}
+IP.{{ loop.index }} = {{ ip_addr }}
+{% endfor %}

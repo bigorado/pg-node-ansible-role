@@ -1,0 +1,157 @@
+---
+pg_node_app_name: "pg-node"
+
+pg_node_app_dir: "/opt/{{ pg_node_app_name }}"
+pg_node_data_dir: "/var/lib/{{ pg_node_app_name }}"
+pg_node_certs_dir: "{{ pg_node_data_dir }}/certs"
+
+pg_node_container_name: "node"
+pg_node_image: "pasarguard/node:latest"
+
+pg_node_name: "{{ inventory_hostname }}"
+
+pg_node_service_port: 62050
+pg_node_host: "0.0.0.0"
+pg_node_connection_type: "grpc"
+
+# Если пусто, роль сгенерирует UUID v4 или возьмёт существующий из .env.
+pg_node_api_key: ""
+
+# Если пусто, роль сама получит белый IPv4 через ifconfig.io/api.ipify.org.
+pg_node_public_ip: ""
+
+# Address, который уйдёт в payload PasarGuard.
+# Если пусто, будет использован белый IP сервера.
+# Если тут домен, он автоматически добавится в DNS SAN.
+# Если тут IP, он автоматически добавится в IP SAN.
+pg_node_register_address: ""
+
+# DNS SAN сертификата ноды.
+pg_node_cert_dns_names: []
+
+# Дополнительные IP SAN, если нужны кроме 127.0.0.1 и белого IP сервера.
+pg_node_cert_extra_ip_sans: []
+
+pg_node_cert_days: 3650
+pg_node_cert_force: false
+
+pg_node_ssl_cert_file: "{{ pg_node_certs_dir }}/ssl_cert.pem"
+pg_node_ssl_key_file: "{{ pg_node_certs_dir }}/ssl_key.pem"
+pg_node_openssl_config_file: "{{ pg_node_certs_dir }}/openssl-san.cnf"
+
+pg_node_print_sensitive: true
+
+pg_node_output_file: "{{ pg_node_app_dir }}/install-result.txt"
+pg_node_output_include_sensitive: "{{ pg_node_print_sensitive | default(false) }}"
+
+pg_node_api_key_regex: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+# Docker install
+pg_node_install_docker: true
+
+# auto:
+#   если docker + docker compose уже есть, ничего не ставим;
+#   если найден containerd.io, используем Docker CE;
+#   иначе используем Ubuntu packages.
+#
+# ubuntu:
+#   docker.io + docker-compose-v2 из Ubuntu repo.
+#
+# docker_ce:
+#   docker-ce + docker-compose-plugin из download.docker.com.
+pg_node_docker_install_mode: "auto"
+
+# Базовые пакеты без Docker.
+# Важно: docker.io и docker-compose-v2 здесь больше не должны быть.
+pg_node_base_packages:
+  - curl
+  - openssl
+  - ca-certificates
+
+# Оставлено для совместимости, если где-то ещё используется pg_node_required_packages.
+# Docker-пакеты сюда не добавлять.
+pg_node_required_packages:
+  - curl
+  - openssl
+  - ca-certificates
+
+pg_node_docker_prereq_packages:
+  - ca-certificates
+  - curl
+  - gnupg
+
+pg_node_ubuntu_docker_packages:
+  - docker.io
+  - docker-compose-v2
+
+pg_node_docker_ce_conflicting_packages:
+  - docker.io
+  - docker-doc
+  - docker-compose
+  - docker-compose-v2
+  - podman-docker
+  - containerd
+  - runc
+
+pg_node_docker_ce_packages:
+  - docker-ce
+  - docker-ce-cli
+  - containerd.io
+  - docker-buildx-plugin
+  - docker-compose-plugin
+
+# PasarGuard API registration
+pasarguard_register_node: false
+
+pasarguard_base_url: ""
+pasarguard_admin_username: ""
+pasarguard_admin_password: ""
+pasarguard_client_secret: ""
+pasarguard_scope: "Authorized"
+
+pasarguard_auth_token_path: "/api/admin/token"
+pasarguard_auth_grant_type: "password"
+
+pasarguard_node_register_path: "/api/node"
+
+# Confirmed by PasarGuard docs:
+# PUT /api/node/{node_id}
+pasarguard_node_upsert_on_conflict: true
+pasarguard_node_list_path: "/api/node"
+pasarguard_node_update_path: "/api/node/{node_id}"
+pasarguard_node_update_method: "PUT"
+
+# Поле ID в ответе списка нод.
+pasarguard_node_id_field: "id"
+
+# Если знаешь ID существующей ноды, можно указать явно.
+# Тогда роль не будет делать GET списка, а сразу выполнит PUT /api/node/{node_id}.
+pasarguard_existing_node_id: ""
+
+# По доке modify node поддерживает status.
+# По умолчанию не отправляем, чтобы роль случайно не выключала ноду.
+# Если backend потребует status, задай явно в vars:
+# pg_node_status: "disabled"
+pg_node_status: ""
+
+# Это относится только к HTTPS-запросам Ansible -> PasarGuard API.
+# К сертификату самой ноды не относится.
+pasarguard_validate_certs: true
+
+pg_node_core_config_id: 1
+pg_node_keep_alive: 60
+pg_node_usage_coefficient: 1
+
+# В create теперь 409 не считается финальным успехом.
+# 409 обрабатывается через upsert/update.
+pasarguard_register_success_codes:
+  - 200
+  - 201
+
+pasarguard_debug_http: false
+
+# Обычно не нужно. Если задано, это значение уйдёт в payload server_ca вместо сгенерированного сертификата.
+pg_node_server_ca_override: ""
+
+# Позволяет переопределить любое поле итогового payload регистрации/update.
+pg_node_register_payload_override: {}

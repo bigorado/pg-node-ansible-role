@@ -1,0 +1,10 @@
+---
+- name: Restart pg node
+  ansible.builtin.command: >-
+    docker compose
+    -f {{ pg_node_app_dir }}/docker-compose.yml
+    -p {{ pg_node_app_name }}
+    up -d --force-recreate --remove-orphans node
+  args:
+    chdir: "{{ pg_node_app_dir }}"
+  changed_when: true

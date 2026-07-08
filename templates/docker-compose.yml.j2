@@ -1,0 +1,13 @@
+services:
+  node:
+    container_name: {{ pg_node_container_name }}
+    image: {{ pg_node_image }}
+    restart: always
+    network_mode: host
+    privileged: true
+    cap_add:
+      - NET_ADMIN
+    env_file: .env
+    volumes:
+      - {{ pg_node_data_dir }}:{{ pg_node_data_dir }}
+      - /etc/letsencrypt:/etc/letsencrypt:ro

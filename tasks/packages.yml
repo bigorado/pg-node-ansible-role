@@ -1,0 +1,219 @@
+---
+- name: Install base packages on Debian/Ubuntu
+  ansible.builtin.apt:
+    name: "{{ pg_node_base_packages }}"
+    state: present
+    update_cache: true
+  when: ansible_os_family == "Debian"
+
+- name: Check Docker CLI
+  ansible.builtin.command: docker --version
+  register: pg_node_docker_cli_check
+  changed_when: false
+  failed_when: false
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+
+- name: Check Docker Compose plugin
+  ansible.builtin.command: docker compose version
+  register: pg_node_docker_compose_check
+  changed_when: false
+  failed_when: false
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+
+- name: Set Docker ready fact
+  ansible.builtin.set_fact:
+    pg_node_docker_ready: >-
+      {{
+        pg_node_docker_cli_check.rc | default(1) == 0
+        and pg_node_docker_compose_check.rc | default(1) == 0
+      }}
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+
+- name: Detect containerd.io package
+  ansible.builtin.command: dpkg-query -W -f='${Status}' containerd.io
+  register: pg_node_containerd_io_check
+  changed_when: false
+  failed_when: false
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+    - not pg_node_docker_ready | default(false) | bool
+
+- name: Set Docker install mode
+  ansible.builtin.set_fact:
+    pg_node_docker_install_mode_effective: >-
+      {{
+        'skip'
+        if pg_node_docker_ready | default(false) | bool
+        else (
+          'docker_ce'
+          if (
+            pg_node_docker_install_mode == 'docker_ce'
+            or (
+              pg_node_docker_install_mode == 'auto'
+              and 'install ok installed' in (pg_node_containerd_io_check.stdout | default(''))
+            )
+          )
+          else 'ubuntu'
+        )
+      }}
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+
+- name: Print Docker install mode
+  ansible.builtin.debug:
+    msg:
+      - "Docker install mode: {{ pg_node_docker_install_mode_effective | default('disabled') }}"
+      - "Docker CLI check rc: {{ pg_node_docker_cli_check.rc | default('not checked') }}"
+      - "Docker Compose check rc: {{ pg_node_docker_compose_check.rc | default('not checked') }}"
+      - "containerd.io status: {{ pg_node_containerd_io_check.stdout | default('not checked') }}"
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+
+- name: Install Docker from Ubuntu packages
+  ansible.builtin.apt:
+    name: "{{ pg_node_ubuntu_docker_packages }}"
+    state: present
+    update_cache: true
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+    - pg_node_docker_install_mode_effective == "ubuntu"
+
+- name: Install Docker CE prerequisites
+  ansible.builtin.apt:
+    name: "{{ pg_node_docker_prereq_packages }}"
+    state: present
+    update_cache: true
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+    - pg_node_docker_install_mode_effective == "docker_ce"
+
+- name: Remove packages conflicting with Docker CE
+  ansible.builtin.apt:
+    name: "{{ pg_node_docker_ce_conflicting_packages }}"
+    state: absent
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+    - pg_node_docker_install_mode_effective == "docker_ce"
+
+- name: Create Docker apt keyring directory
+  ansible.builtin.file:
+    path: /etc/apt/keyrings
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+    - pg_node_docker_install_mode_effective == "docker_ce"
+
+- name: Download Docker apt GPG key
+  ansible.builtin.get_url:
+    url: "https://download.docker.com/linux/ubuntu/gpg"
+    dest: /etc/apt/keyrings/docker.asc
+    owner: root
+    group: root
+    mode: "0644"
+    force: true
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+    - pg_node_docker_install_mode_effective == "docker_ce"
+
+- name: Detect dpkg architecture
+  ansible.builtin.command: dpkg --print-architecture
+  register: pg_node_dpkg_arch
+  changed_when: false
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+    - pg_node_docker_install_mode_effective == "docker_ce"
+
+- name: Set Docker apt architecture
+  ansible.builtin.set_fact:
+    pg_node_docker_apt_arch: "{{ pg_node_dpkg_arch.stdout | trim }}"
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+    - pg_node_docker_install_mode_effective == "docker_ce"
+
+- name: Add Docker CE apt repository
+  ansible.builtin.apt_repository:
+    repo: >-
+      deb [arch={{ pg_node_docker_apt_arch }} signed-by=/etc/apt/keyrings/docker.asc]
+      https://download.docker.com/linux/ubuntu
+      {{ ansible_distribution_release }}
+      stable
+    filename: docker
+    state: present
+    update_cache: true
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+    - pg_node_docker_install_mode_effective == "docker_ce"
+
+- name: Install Docker CE packages
+  ansible.builtin.apt:
+    name: "{{ pg_node_docker_ce_packages }}"
+    state: present
+    update_cache: true
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+    - pg_node_docker_install_mode_effective == "docker_ce"
+
+- name: Enable and start Docker
+  ansible.builtin.service:
+    name: docker
+    state: started
+    enabled: true
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+
+- name: Validate Docker CLI after install
+  ansible.builtin.command: docker --version
+  register: pg_node_docker_cli_final
+  changed_when: false
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+
+- name: Validate Docker Compose plugin after install
+  ansible.builtin.command: docker compose version
+  register: pg_node_docker_compose_final
+  changed_when: false
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool
+
+- name: Fail if Docker Compose plugin is unavailable
+  ansible.builtin.assert:
+    that:
+      - pg_node_docker_cli_final.rc == 0
+      - pg_node_docker_compose_final.rc == 0
+    fail_msg: |
+      Docker or Docker Compose plugin is unavailable.
+
+      docker --version:
+      {{ pg_node_docker_cli_final.stdout | default('') }}
+      {{ pg_node_docker_cli_final.stderr | default('') }}
+
+      docker compose version:
+      {{ pg_node_docker_compose_final.stdout | default('') }}
+      {{ pg_node_docker_compose_final.stderr | default('') }}
+  when:
+    - ansible_os_family == "Debian"
+    - pg_node_install_docker | bool

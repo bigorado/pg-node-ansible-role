@@ -1,0 +1,76 @@
+---
+- name: Render OpenSSL SAN config
+  ansible.builtin.template:
+    src: openssl-san.cnf.j2
+    dest: "{{ pg_node_openssl_config_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+  register: pg_node_openssl_config_result
+
+- name: Check existing certificate
+  ansible.builtin.stat:
+    path: "{{ pg_node_ssl_cert_file }}"
+  register: pg_node_cert_stat
+
+- name: Check existing private key
+  ansible.builtin.stat:
+    path: "{{ pg_node_ssl_key_file }}"
+  register: pg_node_key_stat
+
+- name: Generate self-signed node certificate
+  ansible.builtin.command: >-
+    openssl req -x509 -newkey ec
+    -pkeyopt ec_paramgen_curve:P-256
+    -keyout {{ pg_node_ssl_key_file }}
+    -out {{ pg_node_ssl_cert_file }}
+    -days {{ pg_node_cert_days }}
+    -nodes
+    -config {{ pg_node_openssl_config_file }}
+    -extensions v3_req
+  register: pg_node_cert_generate_result
+  when:
+    - pg_node_cert_force | bool
+      or not pg_node_cert_stat.stat.exists
+      or not pg_node_key_stat.stat.exists
+      or pg_node_openssl_config_result.changed
+  notify: Restart pg node
+
+- name: Set certificate permissions
+  ansible.builtin.file:
+    path: "{{ pg_node_ssl_cert_file }}"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Set private key permissions
+  ansible.builtin.file:
+    path: "{{ pg_node_ssl_key_file }}"
+    owner: root
+    group: root
+    mode: "0600"
+
+- name: Read generated certificate text
+  ansible.builtin.command: openssl x509 -in {{ pg_node_ssl_cert_file }} -noout -text
+  register: pg_node_cert_text
+  changed_when: false
+
+- name: Validate certificate contains public IP SAN
+  ansible.builtin.assert:
+    that:
+      - "'IP Address:' ~ pg_node_public_ip_effective in pg_node_cert_text.stdout"
+    fail_msg: "Generated certificate does not contain public IP SAN: {{ pg_node_public_ip_effective }}"
+
+- name: Validate certificate contains all configured DNS SAN entries
+  ansible.builtin.assert:
+    that:
+      - "'DNS:' ~ item in pg_node_cert_text.stdout"
+    fail_msg: "Generated certificate does not contain DNS SAN: {{ item }}"
+  loop: "{{ pg_node_cert_dns_effective }}"
+
+- name: Validate certificate contains all configured IP SAN entries
+  ansible.builtin.assert:
+    that:
+      - "'IP Address:' ~ item in pg_node_cert_text.stdout"
+    fail_msg: "Generated certificate does not contain IP SAN: {{ item }}"
+  loop: "{{ pg_node_cert_ip_effective }}"

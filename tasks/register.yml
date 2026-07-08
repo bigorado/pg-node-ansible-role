@@ -1,0 +1,247 @@
+---
+- name: Validate PasarGuard API settings
+  ansible.builtin.assert:
+    that:
+      - pasarguard_base_url | length > 0
+      - pasarguard_admin_username | length > 0
+      - pasarguard_admin_password | length > 0
+      - pasarguard_client_secret | length > 0
+      - pasarguard_scope | length > 0
+      - pasarguard_auth_token_path | length > 0
+      - pasarguard_node_register_path | length > 0
+    fail_msg: "PasarGuard auth/register variables are incomplete."
+
+- name: Read generated certificate for PasarGuard registration
+  ansible.builtin.slurp:
+    path: "{{ pg_node_ssl_cert_file }}"
+  register: pg_node_cert_slurp_for_register
+  when: pg_node_cert_pem is not defined
+
+- name: Set certificate content fact for PasarGuard registration
+  ansible.builtin.set_fact:
+    pg_node_cert_pem: "{{ pg_node_cert_slurp_for_register.content | b64decode }}"
+  when: pg_node_cert_pem is not defined
+
+- name: Build PasarGuard token request body
+  ansible.builtin.set_fact:
+    pasarguard_token_body:
+      grant_type: "{{ pasarguard_auth_grant_type }}"
+      username: "{{ pasarguard_admin_username }}"
+      password: "{{ pasarguard_admin_password }}"
+      scope: "{{ pasarguard_scope }}"
+  no_log: true
+
+- name: Request PasarGuard access token
+  ansible.builtin.uri:
+    url: "{{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_auth_token_path }}"
+    method: POST
+    url_username: "{{ pasarguard_admin_username }}"
+    url_password: "{{ pasarguard_client_secret }}"
+    force_basic_auth: true
+    headers:
+      Content-Type: "application/x-www-form-urlencoded"
+    body_format: form-urlencoded
+    body: "{{ pasarguard_token_body }}"
+    validate_certs: "{{ pasarguard_validate_certs | bool }}"
+    status_code:
+      - 200
+      - 400
+      - 401
+      - 403
+      - 404
+      - 405
+      - 422
+      - 500
+    return_content: true
+    timeout: 20
+  register: pasarguard_token_response
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: Fail with readable PasarGuard token error
+  ansible.builtin.fail:
+    msg: |
+      PasarGuard token request failed.
+
+      URL:
+      {{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_auth_token_path }}
+
+      HTTP status:
+      {{ pasarguard_token_response.status | default('NO_STATUS') }}
+
+      Response message:
+      {{ pasarguard_token_response.msg | default('NO_MSG') }}
+
+      Response content:
+      {{ pasarguard_token_response.content | default('NO_CONTENT') }}
+
+      Expected auth scheme:
+      POST {{ pasarguard_auth_token_path }}
+      Basic Auth username = pasarguard_admin_username
+      Basic Auth password = pasarguard_client_secret
+      Form body:
+        grant_type={{ pasarguard_auth_grant_type }}
+        username=<hidden>
+        password=<hidden>
+        scope={{ pasarguard_scope }}
+
+      If this is TLS verification for PasarGuard API itself, set:
+        pasarguard_validate_certs: false
+
+      If this is 401/403, check:
+        pasarguard_admin_username
+        pasarguard_admin_password
+        pasarguard_client_secret
+        pasarguard_scope
+
+      If this is 404/405, check:
+        pasarguard_auth_token_path
+  when: pasarguard_token_response.status | default(0) | int != 200
+
+- name: Validate PasarGuard access token response
+  ansible.builtin.assert:
+    that:
+      - pasarguard_token_response.json is defined
+      - pasarguard_token_response.json.access_token is defined
+      - pasarguard_token_response.json.access_token | length > 0
+    fail_msg: |
+      PasarGuard token response does not contain access_token.
+
+      HTTP status:
+      {{ pasarguard_token_response.status | default('NO_STATUS') }}
+
+      Response content:
+      {{ pasarguard_token_response.content | default('NO_CONTENT') }}
+
+- name: Set PasarGuard access token fact
+  ansible.builtin.set_fact:
+    pasarguard_access_token: "{{ pasarguard_token_response.json.access_token }}"
+  no_log: true
+
+- name: Set effective server_ca for registration
+  ansible.builtin.set_fact:
+    pg_node_server_ca_effective: >-
+      {{
+        pg_node_server_ca_override
+        if (pg_node_server_ca_override is defined and pg_node_server_ca_override | length > 0)
+        else pg_node_cert_pem
+      }}
+
+- name: Build default node registration payload
+  ansible.builtin.set_fact:
+    pasarguard_node_register_payload_default:
+      address: "{{ pg_node_register_address_effective }}"
+      api_key: "{{ pg_node_api_key_effective }}"
+      connection_type: "{{ pg_node_connection_type }}"
+      core_config_id: "{{ pg_node_core_config_id | int }}"
+      keep_alive: "{{ pg_node_keep_alive | int }}"
+      name: "{{ pg_node_name | default(inventory_hostname) }}"
+      port: "{{ pg_node_service_port | int }}"
+      server_ca: "{{ pg_node_server_ca_effective }}"
+      usage_coefficient: "{{ pg_node_usage_coefficient | int }}"
+
+- name: Apply node registration payload override
+  ansible.builtin.set_fact:
+    pasarguard_node_register_payload: "{{ pasarguard_node_register_payload_default | combine(pg_node_register_payload_override, recursive=True) }}"
+
+- name: Print PasarGuard node registration payload summary
+  ansible.builtin.debug:
+    msg:
+      - "PasarGuard node registration payload"
+      - "URL: {{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_node_register_path }}"
+      - "name: {{ pasarguard_node_register_payload.name }}"
+      - "address: {{ pasarguard_node_register_payload.address }}"
+      - "port: {{ pasarguard_node_register_payload.port }}"
+      - "connection_type: {{ pasarguard_node_register_payload.connection_type }}"
+      - "core_config_id: {{ pasarguard_node_register_payload.core_config_id }}"
+      - "keep_alive: {{ pasarguard_node_register_payload.keep_alive }}"
+      - "usage_coefficient: {{ pasarguard_node_register_payload.usage_coefficient }}"
+      - "api_key_present: {{ (pasarguard_node_register_payload.api_key | length > 0) | ternary('yes', 'no') }}"
+      - "server_ca_present: {{ (pasarguard_node_register_payload.server_ca | length > 0) | ternary('yes', 'no') }}"
+
+- name: Register node in PasarGuard
+  ansible.builtin.uri:
+    url: "{{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_node_register_path }}"
+    method: POST
+    headers:
+      Authorization: "Bearer {{ pasarguard_access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body: "{{ pasarguard_node_register_payload }}"
+    validate_certs: "{{ pasarguard_validate_certs | bool }}"
+    status_code:
+      - 200
+      - 201
+      - 400
+      - 401
+      - 403
+      - 404
+      - 409
+      - 422
+      - 500
+    return_content: true
+    timeout: 20
+  register: pasarguard_register_response
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: Fail with readable PasarGuard node registration error
+  ansible.builtin.fail:
+    msg: |
+      PasarGuard node registration failed.
+
+      URL:
+      {{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_node_register_path }}
+
+      HTTP status:
+      {{ pasarguard_register_response.status | default('NO_STATUS') }}
+
+      Response message:
+      {{ pasarguard_register_response.msg | default('NO_MSG') }}
+
+      Response content:
+      {{ pasarguard_register_response.content | default('NO_CONTENT') }}
+
+      Payload summary:
+        name={{ pasarguard_node_register_payload.name }}
+        address={{ pasarguard_node_register_payload.address }}
+        port={{ pasarguard_node_register_payload.port }}
+        connection_type={{ pasarguard_node_register_payload.connection_type }}
+        core_config_id={{ pasarguard_node_register_payload.core_config_id }}
+        keep_alive={{ pasarguard_node_register_payload.keep_alive }}
+        usage_coefficient={{ pasarguard_node_register_payload.usage_coefficient }}
+        api_key_present={{ (pasarguard_node_register_payload.api_key | length > 0) | ternary('yes', 'no') }}
+        server_ca_present={{ (pasarguard_node_register_payload.server_ca | length > 0) | ternary('yes', 'no') }}
+
+      If this is 404/405, check:
+        pasarguard_node_register_path
+
+      If this is 400/422, check payload field names expected by PasarGuard backend.
+  when: pasarguard_register_response.status | default(0) | int not in [200, 201, 409]
+
+- name: Save PasarGuard registration status fact
+  ansible.builtin.set_fact:
+    pasarguard_register_status_text: >-
+      registered, http_status={{ pasarguard_register_response.status }},
+      url={{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_node_register_path }}
+
+- name: Print PasarGuard registration status
+  ansible.builtin.debug:
+    msg:
+      - "PasarGuard node registration completed"
+      - "HTTP status: {{ pasarguard_register_response.status }}"
+      - "URL: {{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_node_register_path }}"
+      - "Address: {{ pasarguard_node_register_payload.address }}"
+      - "Name: {{ pasarguard_node_register_payload.name }}"
+      - "Port: {{ pasarguard_node_register_payload.port }}"
+      - "Connection type: {{ pasarguard_node_register_payload.connection_type }}"
+      - "server_ca was sent: {{ (pasarguard_node_register_payload.server_ca | length > 0) | ternary('yes', 'no') }}"
+
+- name: Print PasarGuard registration response
+  ansible.builtin.debug:
+    var: pasarguard_register_response.json
+  when:
+    - pasarguard_debug_http | bool
+    - pasarguard_register_response.json is defined

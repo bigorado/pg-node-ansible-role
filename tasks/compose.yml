@@ -1,0 +1,75 @@
+---
+- name: Render docker-compose.yml
+  ansible.builtin.template:
+    src: docker-compose.yml.j2
+    dest: "{{ pg_node_app_dir }}/docker-compose.yml"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart pg node
+
+- name: Render .env
+  ansible.builtin.template:
+    src: pg-node.env.j2
+    dest: "{{ pg_node_app_dir }}/.env"
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart pg node
+
+- name: Pull node image
+  ansible.builtin.command: >-
+    docker compose
+    -f {{ pg_node_app_dir }}/docker-compose.yml
+    -p {{ pg_node_app_name }}
+    pull
+  args:
+    chdir: "{{ pg_node_app_dir }}"
+  register: pg_node_compose_pull_result
+  changed_when: >-
+    'Downloaded newer image' in pg_node_compose_pull_result.stdout
+    or 'Pull complete' in pg_node_compose_pull_result.stdout
+    or 'Downloaded newer image' in pg_node_compose_pull_result.stderr
+    or 'Pull complete' in pg_node_compose_pull_result.stderr
+
+- name: Start node container
+  ansible.builtin.command: >-
+    docker compose
+    -f {{ pg_node_app_dir }}/docker-compose.yml
+    -p {{ pg_node_app_name }}
+    up -d
+  args:
+    chdir: "{{ pg_node_app_dir }}"
+  register: pg_node_compose_up_result
+  changed_when: >-
+    'Started' in pg_node_compose_up_result.stdout
+    or 'Created' in pg_node_compose_up_result.stdout
+    or 'Recreated' in pg_node_compose_up_result.stdout
+    or 'Started' in pg_node_compose_up_result.stderr
+    or 'Created' in pg_node_compose_up_result.stderr
+    or 'Recreated' in pg_node_compose_up_result.stderr
+
+- name: Flush handlers after compose or certificate changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Check node container status
+  ansible.builtin.command: >-
+    docker ps
+    --filter name=^/{{ pg_node_container_name }}$
+    --format '{{ "{{.Names}} {{.Status}}" }}'
+  register: pg_node_container_status
+  changed_when: false
+
+- name: Fail if node container is not running
+  ansible.builtin.assert:
+    that:
+      - pg_node_container_status.stdout is search(pg_node_container_name)
+    fail_msg: |
+      Node container {{ pg_node_container_name }} is not running.
+
+      docker ps output:
+      {{ pg_node_container_status.stdout }}
+
+      Check manually:
+        docker ps -a
+        docker logs {{ pg_node_container_name }} --tail=100

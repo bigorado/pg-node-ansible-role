@@ -1,0 +1,178 @@
+---
+- name: Create application and data directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - path: "{{ pg_node_app_dir }}"
+      mode: "0755"
+    - path: "{{ pg_node_data_dir }}"
+      mode: "0755"
+    - path: "{{ pg_node_certs_dir }}"
+      mode: "0755"
+    - path: "/etc/letsencrypt"
+      mode: "0755"
+
+- name: Check existing env file
+  ansible.builtin.stat:
+    path: "{{ pg_node_app_dir }}/.env"
+  register: pg_node_env_stat
+
+- name: Read existing API key from env
+  ansible.builtin.shell: |
+    set -o pipefail
+    grep -E '^[[:space:]]*API_KEY[[:space:]]*=' {{ pg_node_app_dir }}/.env \
+      | head -n 1 \
+      | sed -E 's/^[[:space:]]*API_KEY[[:space:]]*=[[:space:]]*//; s/[[:space:]]*$//'
+  args:
+    executable: /bin/bash
+  register: pg_node_existing_api_key_cmd
+  changed_when: false
+  failed_when: false
+  when: pg_node_env_stat.stat.exists
+
+- name: Use API key from variable
+  ansible.builtin.set_fact:
+    pg_node_api_key_effective: "{{ pg_node_api_key }}"
+  when:
+    - pg_node_api_key is defined
+    - pg_node_api_key | length > 0
+
+- name: Use existing API key from .env
+  ansible.builtin.set_fact:
+    pg_node_api_key_effective: "{{ pg_node_existing_api_key_cmd.stdout | trim }}"
+  when:
+    - pg_node_api_key_effective is not defined
+    - pg_node_env_stat.stat.exists
+    - pg_node_existing_api_key_cmd.stdout is defined
+    - pg_node_existing_api_key_cmd.stdout | trim is match(pg_node_api_key_regex)
+
+- name: Generate UUID v4 API key
+  ansible.builtin.command: cat /proc/sys/kernel/random/uuid
+  register: pg_node_generated_api_key_cmd
+  changed_when: true
+  when: pg_node_api_key_effective is not defined
+
+- name: Save generated API key fact
+  ansible.builtin.set_fact:
+    pg_node_api_key_effective: "{{ pg_node_generated_api_key_cmd.stdout | trim }}"
+  when: pg_node_api_key_effective is not defined
+
+- name: Validate API key
+  ansible.builtin.assert:
+    that:
+      - pg_node_api_key_effective is match(pg_node_api_key_regex)
+    fail_msg: "API_KEY must be a valid UUID. Current value: {{ pg_node_api_key_effective }}"
+
+- name: Detect public IPv4 from target host
+  ansible.builtin.shell: |
+    set -o pipefail
+    curl -s -4 --fail --max-time 5 https://ifconfig.io \
+      || curl -s -4 --fail --max-time 5 https://api.ipify.org \
+      || true
+  args:
+    executable: /bin/bash
+  register: pg_node_detected_public_ip_cmd
+  changed_when: false
+
+- name: Set effective public IP
+  ansible.builtin.set_fact:
+    pg_node_public_ip_effective: >-
+      {{
+        (
+          pg_node_public_ip
+          if (pg_node_public_ip is defined and pg_node_public_ip | length > 0)
+          else (
+            pg_node_detected_public_ip_cmd.stdout | trim
+            if (pg_node_detected_public_ip_cmd.stdout | trim | length > 0)
+            else ansible_default_ipv4.address
+          )
+        )
+      }}
+
+- name: Validate effective public IP is not empty
+  ansible.builtin.assert:
+    that:
+      - pg_node_public_ip_effective | length > 0
+    fail_msg: "Could not detect public IP. Set pg_node_public_ip manually."
+
+- name: Set effective register address
+  ansible.builtin.set_fact:
+    pg_node_register_address_effective: >-
+      {{
+        pg_node_register_address
+        if (pg_node_register_address is defined and pg_node_register_address | length > 0)
+        else pg_node_public_ip_effective
+      }}
+
+- name: Validate register address
+  ansible.builtin.assert:
+    that:
+      - pg_node_register_address_effective | length > 0
+      - pg_node_register_address_effective is not search('^https?://')
+      - pg_node_register_address_effective is not search('/')
+    fail_msg: >-
+      pg_node_register_address must be only host/IP without scheme, path or port.
+      Example: 192.144.57.130 or de-node.example.com.
+      Current value: {{ pg_node_register_address_effective }}
+
+- name: Detect register address type
+  ansible.builtin.set_fact:
+    pg_node_register_address_is_ip: >-
+      {{
+        (pg_node_register_address_effective is match('^([0-9]{1,3}\.){3}[0-9]{1,3}$'))
+        or (':' in pg_node_register_address_effective)
+      }}
+
+- name: Normalize DNS SAN list
+  ansible.builtin.set_fact:
+    pg_node_cert_dns_from_vars: "{{ pg_node_cert_dns_names | default([]) | map('trim') | reject('equalto', '') | list }}"
+
+- name: Normalize extra IP SAN list
+  ansible.builtin.set_fact:
+    pg_node_cert_extra_ips_from_vars: "{{ pg_node_cert_extra_ip_sans | default([]) | map('trim') | reject('equalto', '') | list }}"
+
+- name: Prepare certificate DNS SAN list
+  ansible.builtin.set_fact:
+    pg_node_cert_dns_effective: >-
+      {{
+        (
+          ['localhost']
+          + pg_node_cert_dns_from_vars
+          + ([] if (pg_node_register_address_is_ip | bool) else [pg_node_register_address_effective])
+        )
+        | map('trim')
+        | reject('equalto', '')
+        | unique
+        | list
+      }}
+
+- name: Prepare certificate IP SAN list
+  ansible.builtin.set_fact:
+    pg_node_cert_ip_effective: >-
+      {{
+        (
+          ['127.0.0.1']
+          + [pg_node_public_ip_effective]
+          + pg_node_cert_extra_ips_from_vars
+          + ([pg_node_register_address_effective] if (pg_node_register_address_is_ip | bool) else [])
+        )
+        | map('trim')
+        | reject('equalto', '')
+        | unique
+        | list
+      }}
+
+- name: Set certificate common name
+  ansible.builtin.set_fact:
+    pg_node_cert_cn: "{{ pg_node_register_address_effective }}"
+
+- name: Show certificate SAN plan
+  ansible.builtin.debug:
+    msg:
+      - "Certificate CN: {{ pg_node_cert_cn }}"
+      - "DNS SAN: {{ pg_node_cert_dns_effective | join(', ') }}"
+      - "IP SAN: {{ pg_node_cert_ip_effective | join(', ') }}"

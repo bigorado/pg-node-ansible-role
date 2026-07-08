@@ -1,0 +1,19 @@
+---
+- name: Install packages
+  ansible.builtin.include_tasks: packages.yml
+
+- name: Prepare node facts
+  ansible.builtin.include_tasks: facts.yml
+
+- name: Generate certificate
+  ansible.builtin.include_tasks: cert.yml
+
+- name: Configure and start compose
+  ansible.builtin.include_tasks: compose.yml
+
+- name: Register node in PasarGuard
+  ansible.builtin.include_tasks: register.yml
+  when: pasarguard_register_node | bool
+
+- name: Print generated values
+  ansible.builtin.include_tasks: output.yml

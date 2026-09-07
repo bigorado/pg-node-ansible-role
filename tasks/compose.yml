@@ -15,7 +15,9 @@
     owner: root
     group: root
     mode: "0600"
-  notify: Restart pg node
+  notify:
+    - Restart pg node
+    - Restart pg node serviced
 
 - name: Pull node image
   ansible.builtin.command: >-

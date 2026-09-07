@@ -11,6 +11,41 @@ pg_node_image: "pasarguard/node:latest"
 pg_node_name: "{{ inventory_hostname }}"
 
 pg_node_service_port: 62050
+
+# Второй порт ноды (API_PORT в .env). По нему панель шлёт команды на ноду
+# (update core, restart и т.п.) и делает connectivity check. В панели это поле
+# "API Порт" в расширенных настройках ноды. Пусто = не задавать API_PORT
+# и не ставить node-serviced.
+pg_node_api_port: 62051
+
+# ---------------------------------------------------------------------------
+# node-serviced — management API sidecar, слушает API_PORT (pg_node_api_port).
+#
+# Это отдельный бинарник PasarGuard/node-serviced + systemd unit
+# `{{ pg_node_app_name }}-service`, который и отвечает панели на API_PORT
+# (update core, restart, connectivity check). Сама нода (docker или systemd)
+# API_PORT не открывает — читает только SERVICE_PORT. Ставится рядом, в обоих
+# режимах. Соответствует шагу `pg-node.sh service-install`.
+# ---------------------------------------------------------------------------
+pg_node_install_serviced: true
+
+pg_node_serviced_repo: "PasarGuard/node-serviced"
+pg_node_serviced_service_name: "{{ pg_node_app_name }}-service"
+pg_node_serviced_bin_path: "/usr/local/bin/{{ pg_node_serviced_service_name }}"
+
+# latest — взять последний релиз с GitHub. Либо точный тег, напр. "v0.1.4".
+pg_node_serviced_version: "latest"
+
+# Перекачивать бинарник при каждом запуске роли (держать актуальную версию).
+pg_node_serviced_update: true
+
+# yq (mikefarah) — нужен CLI pg-node для `core-update` / `edit`; node-serviced
+# при core_update дёргает `pg-node core-update`. В репах Debian/Ubuntu годного yq
+# нет, ставим бинарник с GitHub.
+pg_node_install_yq: true
+pg_node_yq_version: "latest"
+pg_node_yq_bin_path: "/usr/local/bin/yq"
+
 pg_node_host: "0.0.0.0"
 pg_node_connection_type: "grpc"
 
@@ -46,6 +81,13 @@ pg_node_output_include_sensitive: "{{ pg_node_print_sensitive | default(false) }
 
 pg_node_api_key_regex: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
 
+# Режим развёртывания ноды:
+#   docker  - нода в контейнере через docker compose (по умолчанию, прежнее поведение);
+#   systemd - нативная сборка бинарника PasarGuard/node + управление через systemd
+#             (/etc/systemd/system/pg-node.service), без Docker.
+#             Соответствует разделу доки "Настройка как системный сервис (ручная установка)".
+pg_node_deploy_mode: "docker"
+
 # Docker install
 pg_node_install_docker: true
 
@@ -67,6 +109,8 @@ pg_node_base_packages:
   - curl
   - openssl
   - ca-certificates
+  - unzip
+  - tar
 
 # Оставлено для совместимости, если где-то ещё используется pg_node_required_packages.
 # Docker-пакеты сюда не добавлять.
@@ -100,6 +144,115 @@ pg_node_docker_ce_packages:
   - docker-buildx-plugin
   - docker-compose-plugin
 
+# Node management CLI (pg-node.sh)
+#
+# Ставит официальный скрипт управления нодой из репозитория PasarGuard/scripts
+# в /usr/local/bin/{{ pg_node_app_name }}. После установки на сервере доступны команды:
+#   {{ pg_node_app_name }} up | down | restart | status | logs
+#   {{ pg_node_app_name }} update | core-update | edit | edit-env
+#
+# Скрипт использует те же пути, что и роль:
+#   APP_DIR  = /opt/{{ pg_node_app_name }}
+#   DATA_DIR = /var/lib/{{ pg_node_app_name }}
+# поэтому он управляет тем же docker-compose.yml, .env и сертификатом.
+pg_node_install_cli: true
+
+pg_node_cli_url: "https://github.com/PasarGuard/scripts/raw/main/pg-node.sh"
+pg_node_cli_path: "/usr/local/bin/{{ pg_node_app_name }}"
+
+# Перекачивать скрипт при каждом запуске роли (держать последнюю версию).
+# false — не трогать файл, если он уже существует.
+pg_node_cli_update: true
+
+# ---------------------------------------------------------------------------
+# systemd deploy mode (pg_node_deploy_mode: systemd)
+#
+# Роль собирает бинарник из исходников PasarGuard/node, ставит Xray core и
+# создаёт systemd unit. Сертификат и .env переиспользуются те же, что и в
+# docker-режиме (/var/lib/pg-node/certs, /opt/pg-node/.env).
+# ---------------------------------------------------------------------------
+
+# Имя systemd unit без суффикса .service.
+# Файл: /etc/systemd/system/{{ pg_node_service_name }}.service
+pg_node_service_name: "{{ pg_node_app_name }}"
+
+# От кого работает сервис.
+pg_node_service_user: "root"
+pg_node_service_group: "root"
+
+# Исходники ноды и собранный бинарник.
+pg_node_src_repo: "https://github.com/PasarGuard/node.git"
+pg_node_src_version: "main"
+pg_node_src_dir: "{{ pg_node_app_dir }}/node"
+pg_node_bin_path: "{{ pg_node_app_dir }}/pasarguard-node"
+
+# Пересобирать бинарник при каждом запуске роли.
+# false - собирать только если бинарника нет или обновились исходники.
+pg_node_build_force: false
+
+# Ставить Xray core (scripts/install_core.sh) в systemd-режиме.
+pg_node_install_xray: true
+pg_node_xray_executable_path: "/usr/local/bin/xray"
+pg_node_xray_assets_path: "/usr/local/share/xray"
+
+# ---------------------------------------------------------------------------
+# Geodata (geoip.dat / geosite.dat для Xray). Работает в обоих режимах.
+#
+#   systemd - файлы кладутся в pg_node_geodat_dir, туда же указывает
+#             XRAY_ASSETS_PATH сервиса;
+#   docker  - файлы кладутся на хост в pg_node_geodat_dir (каталог уже
+#             монтируется в контейнер, если он внутри pg_node_data_dir),
+#             а в .env выставляется XRAY_ASSETS_PATH.
+#
+# Роль при каждом запуске скачивает свежие файлы и перезапускает ноду
+# только если содержимое реально изменилось.
+#
+# По умолчанию используются upstream-сборки v2fly (те же данные, что XTLS
+# кладёт в релизы Xray). Можно заменить на любые, например:
+#   Loyalsoldier/v2ray-rules-dat
+#   runetfreedom/russia-v2ray-rules-dat
+#   chocolate4u/Iran-v2ray-rules
+# ---------------------------------------------------------------------------
+pg_node_install_geodat: true
+
+# Каталог с гео-файлами.
+pg_node_geodat_dir: "{{ pg_node_data_dir }}/xray-assets"
+
+# Выставлять XRAY_ASSETS_PATH (в .env и в systemd unit), чтобы Xray читал
+# файлы из pg_node_geodat_dir, а не из каталога рядом с бинарником.
+pg_node_geodat_set_assets_path: true
+
+# name - имя файла на диске, url - откуда качать, checksum - опционально
+# (формат ansible get_url: "sha256:<hex>" или "sha256:https://.../SHA256SUMS").
+pg_node_geodat_files:
+  - name: geoip.dat
+    url: "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat"
+  - name: geosite.dat
+    url: "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat"
+
+# Итоговый XRAY_ASSETS_PATH: каталог geodata, если включено, иначе дефолт xray.
+pg_node_xray_assets_path_effective: >-
+  {{
+    pg_node_geodat_dir
+    if (pg_node_install_geodat | bool and pg_node_geodat_set_assets_path | bool)
+    else pg_node_xray_assets_path
+  }}
+
+# Пакеты для нативной сборки (Debian/Ubuntu).
+pg_node_build_packages:
+  - git
+  - make
+  - gcc
+  - pkg-config
+
+# Go toolchain. PasarGuard/node требует Go >= 1.25.
+# Если в системе уже стоит подходящий Go в {{ pg_node_go_dir }}, повторно не ставим.
+pg_node_go_install: true
+pg_node_go_version: "1.25.1"
+pg_node_go_min_version: "1.25.0"
+pg_node_go_dir: "/usr/local/go"
+pg_node_go_download_base: "https://go.dev/dl"
+
 # PasarGuard API registration
 pasarguard_register_node: false
 
@@ -114,19 +267,22 @@ pasarguard_auth_grant_type: "password"
 
 pasarguard_node_register_path: "/api/node"
 
-# Confirmed by PasarGuard docs:
-# PUT /api/node/{node_id}
-pasarguard_node_upsert_on_conflict: true
-pasarguard_node_list_path: "/api/node"
+# Регистрация ноды (при pasarguard_register_node: true).
+# Роль получает список нод (GET /api/nodes) и ищет ноду по её имени (pg_node_name):
+#   нашлась    -> PUT /api/node/{id}  — перезаписывает поля из host_vars
+#   не нашлась -> POST /api/node      — создаёт (409 не считается ошибкой)
+#   >1 с этим именем -> падение (удали дубли в панели)
+pasarguard_nodes_list_path: "/api/nodes?limit=1000&offset=0"
 pasarguard_node_update_path: "/api/node/{node_id}"
 pasarguard_node_update_method: "PUT"
 
-# Поле ID в ответе списка нод.
-pasarguard_node_id_field: "id"
-
-# Если знаешь ID существующей ноды, можно указать явно.
-# Тогда роль не будет делать GET списка, а сразу выполнит PUT /api/node/{node_id}.
-pasarguard_existing_node_id: ""
+# Поля, которые при PUT-обновлении НЕ отправляются — остаются в панели как есть.
+# Всё остальное (имя, ядро, порты, keep_alive, тайм-ауты, лимит, прокси ...)
+# прилетает из host_vars на каждом прогоне.
+pg_node_update_exclude_fields:
+  - api_key
+  - address
+  - server_ca
 
 # По доке modify node поддерживает status.
 # По умолчанию не отправляем, чтобы роль случайно не выключала ноду.
@@ -138,9 +294,32 @@ pg_node_status: ""
 # К сертификату самой ноды не относится.
 pasarguard_validate_certs: true
 
+# Ядро (core config) ноды. Задаётся числом ИЛИ именем:
+#   pg_node_core_config_id: 58
+#   pg_node_core_config_name: "fr443-new"   # роль резолвит имя в id
+# Если задано имя — оно в приоритете, роль берёт список через
+# GET /api/cores/simple?all=true (нужна включённая регистрация). Дубль имени -> падение.
 pg_node_core_config_id: 1
+pg_node_core_config_name: ""
+pasarguard_cores_list_path: "/api/cores/simple?all=true"
+
+# keep_alive узла в payload регистрации/update (поле "Поддержание соединения"
+# в панели). В секундах. Пример из панели: 21600 (6 часов).
 pg_node_keep_alive: 60
+
 pg_node_usage_coefficient: 1
+
+# Лимит данных ноды (поле "Лимит данных" в панели). В ГБ; роль переводит в байты
+# для API-поля data_limit. 0 = без лимита.
+pg_node_data_limit_gb: 0
+
+# Тайм-ауты ноды (секунды, API допускает 3..60).
+pg_node_default_timeout: 10    # "Тайм-аут по умолчанию"
+pg_node_internal_timeout: 15   # "Внутренний тайм-аут"
+
+# URL прокси для подключения к ноде (поле "URL прокси"), напр.
+# "socks5://127.0.0.1:1080". Пусто = не отправлять (прокси не используется).
+pg_node_proxy_url: ""
 
 # В create теперь 409 не считается финальным успехом.
 # 409 обрабатывается через upsert/update.

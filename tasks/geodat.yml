@@ -1,0 +1,36 @@
+---
+- name: Ensure geodata directory exists
+  ansible.builtin.file:
+    path: "{{ pg_node_geodat_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Download geodata files
+  ansible.builtin.get_url:
+    url: "{{ item.url }}"
+    dest: "{{ pg_node_geodat_dir }}/{{ item.name }}"
+    checksum: "{{ item.checksum | default(omit) }}"
+    owner: root
+    group: root
+    mode: "0644"
+    force: true
+    timeout: 60
+  loop: "{{ pg_node_geodat_files }}"
+  loop_control:
+    label: "{{ item.name }}"
+  register: pg_node_geodat_download
+  notify:
+    - Restart pg node
+    - Restart pg node service
+
+- name: Show geodata files state
+  ansible.builtin.debug:
+    msg: >-
+      {{ item.item.name }}: {{ 'updated' if item.changed else 'unchanged' }}
+      -> {{ pg_node_geodat_dir }}/{{ item.item.name }}
+      ({{ (item.size | default(0) / 1024) | round(1) }} KiB)
+  loop: "{{ pg_node_geodat_download.results }}"
+  loop_control:
+    label: "{{ item.item.name }}"

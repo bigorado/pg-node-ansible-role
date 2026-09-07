@@ -1,0 +1,12 @@
+---
+- name: Converge
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    # Switch mode with:  PG_NODE_DEPLOY_MODE=systemd molecule converge -s <scenario>
+    pg_node_deploy_mode: "{{ lookup('env', 'PG_NODE_DEPLOY_MODE') | default('docker', true) }}"
+    pasarguard_register_node: false
+    pg_node_print_sensitive: true
+  roles:
+    - role: pasarguard.pg_node

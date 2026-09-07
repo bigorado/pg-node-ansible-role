@@ -1,0 +1,48 @@
+---
+# Roll the node back off the live host.
+- name: Destroy
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Compose down (docker mode)
+      ansible.builtin.command: >-
+        docker compose -f /opt/pg-node/docker-compose.yml -p pg-node down --remove-orphans
+      register: _down
+      changed_when: _down.rc == 0
+      failed_when: false
+
+    - name: Stop and disable service (systemd mode)
+      ansible.builtin.systemd:
+        name: pg-node
+        state: stopped
+        enabled: false
+      failed_when: false
+
+    - name: Remove systemd unit
+      ansible.builtin.file:
+        path: /etc/systemd/system/pg-node.service
+        state: absent
+      register: _unit
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: true
+      when: _unit.changed
+
+    - name: Remove role paths
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /opt/pg-node
+        - /var/lib/pg-node
+        - /usr/local/bin/pg-node
+
+    - name: Drop molecule instance state
+      ansible.builtin.file:
+        path: "{{ lookup('env', 'MOLECULE_EPHEMERAL_DIRECTORY') }}/state.yml"
+        state: absent
+      delegate_to: localhost
+      become: false
+      when: lookup('env', 'MOLECULE_EPHEMERAL_DIRECTORY') | length > 0

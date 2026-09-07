@@ -44,15 +44,42 @@
       Address:         {{ pg_node_register_address_effective }}
       Public IP:       {{ pg_node_public_ip_effective }}
       Port:            {{ pg_node_service_port }}
+      {% if pg_node_api_port | default('') | string | length > 0 -%}
+      API port:        {{ pg_node_api_port }}
+      {% endif -%}
       Connection type: {{ pg_node_connection_type }}
+      Keep-alive:      {{ pg_node_keep_alive }}
+      Deploy mode:     {{ pg_node_deploy_mode }}
       Registration:    {{ pasarguard_register_status_text | default('unknown') }}
 
       Files on server:
+      {% if pg_node_deploy_mode == "docker" %}
         Compose:      {{ pg_node_app_dir }}/docker-compose.yml
+      {% else %}
+        Service unit: /etc/systemd/system/{{ pg_node_service_name }}.service
+        Binary:       {{ pg_node_bin_path }}
+        Source:       {{ pg_node_src_dir }}
+      {% endif %}
         Env:          {{ pg_node_app_dir }}/.env
         Summary:      {{ pg_node_output_file }}
         Certificate:  {{ pg_node_ssl_cert_file }}
         Private key:  {{ pg_node_ssl_key_file }}
+      {% if pg_node_install_serviced | bool and pg_node_api_port | default('') | string | length > 0 %}
+        node-serviced: {{ pg_node_serviced_bin_path }} (unit {{ pg_node_serviced_service_name }}, API_PORT {{ pg_node_api_port }})
+      {% endif %}
+      {% if pg_node_install_geodat | bool %}
+        Geodata dir:  {{ pg_node_geodat_dir }} (XRAY_ASSETS_PATH{{ '' if pg_node_geodat_set_assets_path | bool else ' not set' }})
+      {% for geo_file in pg_node_geodat_files %}
+          - {{ geo_file.name }}
+      {% endfor %}
+      {% endif %}
+      {% if pg_node_deploy_mode == "docker" and pg_node_install_cli | bool %}
+        Manage CLI:   {{ pg_node_cli_path }} ({{ pg_node_app_name }} status|logs|restart|update)
+      {% endif %}
+      {% if pg_node_deploy_mode == "systemd" %}
+        Manage:       systemctl {start|stop|restart|status} {{ pg_node_service_name }}
+        Logs:         journalctl -u {{ pg_node_service_name }} -f
+      {% endif %}
 
       SAN used for certificate:
       {% for dns_name in pg_node_cert_dns_effective %}

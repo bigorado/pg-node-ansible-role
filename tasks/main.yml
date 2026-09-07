@@ -1,6 +1,18 @@
 ---
+- name: Validate deploy mode
+  ansible.builtin.assert:
+    that:
+      - pg_node_deploy_mode in ["docker", "systemd"]
+    fail_msg: >-
+      pg_node_deploy_mode must be 'docker' or 'systemd'.
+      Current value: {{ pg_node_deploy_mode }}
+
 - name: Install packages
   ansible.builtin.include_tasks: packages.yml
+
+- name: Install native build toolchain
+  ansible.builtin.include_tasks: build.yml
+  when: pg_node_deploy_mode == "systemd"
 
 - name: Prepare node facts
   ansible.builtin.include_tasks: facts.yml
@@ -8,8 +20,29 @@
 - name: Generate certificate
   ansible.builtin.include_tasks: cert.yml
 
+- name: Install geodata files
+  ansible.builtin.include_tasks: geodat.yml
+  when: pg_node_install_geodat | bool
+
 - name: Configure and start compose
   ansible.builtin.include_tasks: compose.yml
+  when: pg_node_deploy_mode == "docker"
+
+- name: Build binary and configure systemd service
+  ansible.builtin.include_tasks: service.yml
+  when: pg_node_deploy_mode == "systemd"
+
+- name: Install node management CLI
+  ansible.builtin.include_tasks: cli.yml
+  when:
+    - pg_node_install_cli | bool
+    - pg_node_deploy_mode == "docker"
+
+- name: Configure node-serviced (management API sidecar on API_PORT)
+  ansible.builtin.include_tasks: serviced.yml
+  when:
+    - pg_node_install_serviced | bool
+    - pg_node_api_port | default('') | string | length > 0
 
 - name: Register node in PasarGuard
   ansible.builtin.include_tasks: register.yml

@@ -1,0 +1,145 @@
+---
+- name: Resolve Go GOOS/GOARCH
+  ansible.builtin.command: "{{ pg_node_go_dir }}/bin/go env GOOS GOARCH"
+  register: pg_node_goenv
+  changed_when: false
+
+- name: Set build architecture facts
+  ansible.builtin.set_fact:
+    pg_node_goos: "{{ pg_node_goenv.stdout_lines[0] | trim }}"
+    pg_node_goarch: "{{ pg_node_goenv.stdout_lines[1] | trim }}"
+    pg_node_xray_arch: "{{ pg_node_xray_arch_map[pg_node_goenv.stdout_lines[1] | trim] | default('64') }}"
+  vars:
+    pg_node_xray_arch_map:
+      amd64: "64"
+      "386": "32"
+      arm64: arm64-v8a
+      arm: arm32-v7a
+
+- name: Ensure source directory exists
+  ansible.builtin.file:
+    path: "{{ pg_node_src_dir }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "0755"
+
+- name: Checkout PasarGuard node source
+  ansible.builtin.git:
+    repo: "{{ pg_node_src_repo }}"
+    dest: "{{ pg_node_src_dir }}"
+    version: "{{ pg_node_src_version }}"
+    force: true
+  register: pg_node_src_checkout
+
+- name: Check existing node binary
+  ansible.builtin.stat:
+    path: "{{ pg_node_bin_path }}"
+  register: pg_node_bin_stat
+
+- name: Build PasarGuard node
+  when: >-
+    pg_node_build_force | bool
+    or not pg_node_bin_stat.stat.exists
+    or pg_node_src_checkout.changed
+  environment:
+    PATH: "{{ pg_node_go_dir }}/bin:{{ ansible_env.PATH }}"
+    GOTOOLCHAIN: "auto"
+  block:
+    - name: Run make deps
+      ansible.builtin.command:
+        cmd: make deps
+        chdir: "{{ pg_node_src_dir }}"
+      changed_when: true
+
+    - name: Run make build
+      ansible.builtin.command:
+        cmd: "make GOOS={{ pg_node_goos }} GOARCH={{ pg_node_goarch }}"
+        chdir: "{{ pg_node_src_dir }}"
+      changed_when: true
+
+    - name: Find built binary
+      ansible.builtin.find:
+        paths: "{{ pg_node_src_dir }}"
+        patterns: "pasarguard-node-{{ pg_node_goos }}-{{ pg_node_goarch }}*"
+        excludes:
+          - "*.exe"
+          - "*_softfloat"
+        recurse: false
+      register: pg_node_built_bin
+
+    - name: Fail if built binary not found
+      ansible.builtin.assert:
+        that:
+          - pg_node_built_bin.files | length > 0
+        fail_msg: >-
+          Build finished but no pasarguard-node-linux-* binary was found in {{ pg_node_src_dir }}.
+
+    - name: Install built binary
+      ansible.builtin.copy:
+        src: "{{ (pg_node_built_bin.files | sort(attribute='mtime') | last).path }}"
+        dest: "{{ pg_node_bin_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      notify: Restart pg node service
+
+    - name: Install Xray core
+      ansible.builtin.shell:
+        cmd: >-
+          set -o pipefail;
+          curl -fsSL https://github.com/PasarGuard/scripts/raw/main/install_core.sh
+          | bash -s -- --os linux --arch {{ pg_node_xray_arch }}
+      args:
+        executable: /bin/bash
+      register: pg_node_xray_install
+      changed_when: true
+      when: pg_node_install_xray | bool
+
+- name: Render .env for node service
+  ansible.builtin.template:
+    src: pg-node.env.j2
+    dest: "{{ pg_node_app_dir }}/.env"
+    owner: "{{ pg_node_service_user }}"
+    group: "{{ pg_node_service_group }}"
+    mode: "0600"
+  notify:
+    - Restart pg node service
+    - Restart pg node serviced
+
+- name: Render systemd unit for PasarGuard node
+  ansible.builtin.template:
+    src: pg-node.service.j2
+    dest: "/etc/systemd/system/{{ pg_node_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart pg node service
+
+- name: Enable and start PasarGuard node service
+  ansible.builtin.systemd:
+    name: "{{ pg_node_service_name }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Flush handlers after binary, env or unit changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Read node service state
+  ansible.builtin.command: "systemctl is-active {{ pg_node_service_name }}"
+  register: pg_node_service_active
+  changed_when: false
+  failed_when: false
+
+- name: Fail if node service is not active
+  ansible.builtin.assert:
+    that:
+      - pg_node_service_active.stdout | trim == "active"
+    fail_msg: |
+      Service {{ pg_node_service_name }} is not active (state: {{ pg_node_service_active.stdout | trim }}).
+
+      Check manually:
+        systemctl status {{ pg_node_service_name }}
+        journalctl -u {{ pg_node_service_name }} -n 100 --no-pager

@@ -128,39 +128,166 @@
         else pg_node_cert_pem
       }}
 
+# --- core config: resolve by name -> id ---
+- name: Use explicit core config id
+  ansible.builtin.set_fact:
+    pg_node_core_config_id_effective: "{{ pg_node_core_config_id | int }}"
+  when: pg_node_core_config_name | default('') | length == 0
+
+- name: Resolve core config id from name
+  when: pg_node_core_config_name | default('') | length > 0
+  block:
+    - name: List PasarGuard core configs
+      ansible.builtin.uri:
+        url: "{{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_cores_list_path }}"
+        method: GET
+        headers:
+          Authorization: "Bearer {{ pasarguard_access_token }}"
+        validate_certs: "{{ pasarguard_validate_certs | bool }}"
+        return_content: true
+        timeout: 20
+      register: pasarguard_cores_response
+      delegate_to: localhost
+      become: false
+      no_log: true
+
+    - name: Collect core config ids matching name
+      ansible.builtin.set_fact:
+        pg_node_core_config_ids_matched: >-
+          {{
+            (
+              (pasarguard_cores_response.json.cores | default(pasarguard_cores_response.json, true))
+              if pasarguard_cores_response.json is defined else []
+            )
+            | selectattr('name', 'equalto', pg_node_core_config_name)
+            | map(attribute='id') | list
+          }}
+
+    - name: Assert core config name is unique
+      ansible.builtin.assert:
+        that:
+          - pg_node_core_config_ids_matched | length == 1
+        fail_msg: >-
+          core config name '{{ pg_node_core_config_name }}':
+          {{
+            ('not found. Available: '
+              ~ ((pasarguard_cores_response.json.cores | default(pasarguard_cores_response.json, true)) | map(attribute='name') | list))
+            if (pg_node_core_config_ids_matched | length == 0)
+            else ('matches ' ~ (pg_node_core_config_ids_matched | length)
+              ~ ' configs (ids ' ~ pg_node_core_config_ids_matched ~ ') — name must be unique, use pg_node_core_config_id')
+          }}
+
+    - name: Set effective core config id from name
+      ansible.builtin.set_fact:
+        pg_node_core_config_id_effective: "{{ pg_node_core_config_ids_matched[0] | int }}"
+
+- name: Show effective core config
+  ansible.builtin.debug:
+    msg: >-
+      core_config_id={{ pg_node_core_config_id_effective }}
+      {{ '(from name ' ~ pg_node_core_config_name ~ ')' if (pg_node_core_config_name | default('') | length > 0) else '(explicit)' }}
+
 - name: Build default node registration payload
   ansible.builtin.set_fact:
-    pasarguard_node_register_payload_default:
-      address: "{{ pg_node_register_address_effective }}"
-      api_key: "{{ pg_node_api_key_effective }}"
-      connection_type: "{{ pg_node_connection_type }}"
-      core_config_id: "{{ pg_node_core_config_id | int }}"
-      keep_alive: "{{ pg_node_keep_alive | int }}"
-      name: "{{ pg_node_name | default(inventory_hostname) }}"
-      port: "{{ pg_node_service_port | int }}"
-      server_ca: "{{ pg_node_server_ca_effective }}"
-      usage_coefficient: "{{ pg_node_usage_coefficient | int }}"
+    pasarguard_node_register_payload_default: >-
+      {{
+        {
+          'address': pg_node_register_address_effective,
+          'api_key': pg_node_api_key_effective,
+          'connection_type': pg_node_connection_type,
+          'core_config_id': pg_node_core_config_id_effective | int,
+          'keep_alive': pg_node_keep_alive | int,
+          'name': pg_node_name | default(inventory_hostname),
+          'port': pg_node_service_port | int,
+          'server_ca': pg_node_server_ca_effective,
+          'usage_coefficient': pg_node_usage_coefficient | int,
+          'data_limit': (pg_node_data_limit_gb | float * 1073741824) | int,
+          'default_timeout': pg_node_default_timeout | int,
+          'internal_timeout': pg_node_internal_timeout | int,
+          'proxy_url': (pg_node_proxy_url | default('') | trim) or none,
+        }
+        | combine(
+            {'api_port': pg_node_api_port | int}
+            if (pg_node_api_port | default('') | string | length > 0)
+            else {}
+          )
+      }}
 
 - name: Apply node registration payload override
   ansible.builtin.set_fact:
     pasarguard_node_register_payload: "{{ pasarguard_node_register_payload_default | combine(pg_node_register_payload_override, recursive=True) }}"
 
-- name: Print PasarGuard node registration payload summary
+# --- find this node in the panel by its name (pg_node_name) ---
+- name: List PasarGuard nodes
+  ansible.builtin.uri:
+    url: "{{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_nodes_list_path }}"
+    method: GET
+    headers:
+      Authorization: "Bearer {{ pasarguard_access_token }}"
+    validate_certs: "{{ pasarguard_validate_certs | bool }}"
+    return_content: true
+    timeout: 20
+  register: pasarguard_nodes_response
+  delegate_to: localhost
+  become: false
+  no_log: true
+
+- name: Collect node ids matching this node's name
+  ansible.builtin.set_fact:
+    pasarguard_node_ids_matched: >-
+      {{
+        (
+          (pasarguard_nodes_response.json.nodes | default(pasarguard_nodes_response.json, true))
+          if pasarguard_nodes_response.json is defined else []
+        )
+        | selectattr('name', 'equalto', pasarguard_node_register_payload.name)
+        | map(attribute='id') | list
+      }}
+
+- name: Fail if node name is not unique in the panel
+  ansible.builtin.assert:
+    that:
+      - pasarguard_node_ids_matched | length <= 1
+    fail_msg: >-
+      Node name '{{ pasarguard_node_register_payload.name }}' matches
+      {{ pasarguard_node_ids_matched | length }} nodes in the panel
+      (ids {{ pasarguard_node_ids_matched }}). Удали дубли в панели.
+
+- name: Set node target id
+  ansible.builtin.set_fact:
+    pasarguard_node_target_id: >-
+      {{ pasarguard_node_ids_matched[0] | string if (pasarguard_node_ids_matched | length == 1) else '' }}
+
+# PUT-обновление шлёт всё из host_vars, КРОМЕ pg_node_update_exclude_fields
+# (api_key / address / server_ca остаются в панели как есть).
+- name: Build node update payload
+  ansible.builtin.set_fact:
+    pasarguard_node_update_payload: >-
+      {{
+        pasarguard_node_register_payload | dict2items
+        | rejectattr('key', 'in', pg_node_update_exclude_fields)
+        | items2dict
+      }}
+
+- name: Print PasarGuard node payload summary
   ansible.builtin.debug:
     msg:
-      - "PasarGuard node registration payload"
-      - "URL: {{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_node_register_path }}"
+      - "action: {{ 'UPDATE (PUT) node_id=' ~ pasarguard_node_target_id if (pasarguard_node_target_id | length > 0) else 'CREATE (POST)' }}"
       - "name: {{ pasarguard_node_register_payload.name }}"
       - "address: {{ pasarguard_node_register_payload.address }}"
       - "port: {{ pasarguard_node_register_payload.port }}"
+      - "api_port: {{ pasarguard_node_register_payload.api_port | default('not sent') }}"
       - "connection_type: {{ pasarguard_node_register_payload.connection_type }}"
       - "core_config_id: {{ pasarguard_node_register_payload.core_config_id }}"
       - "keep_alive: {{ pasarguard_node_register_payload.keep_alive }}"
       - "usage_coefficient: {{ pasarguard_node_register_payload.usage_coefficient }}"
-      - "api_key_present: {{ (pasarguard_node_register_payload.api_key | length > 0) | ternary('yes', 'no') }}"
-      - "server_ca_present: {{ (pasarguard_node_register_payload.server_ca | length > 0) | ternary('yes', 'no') }}"
+      - "data_limit: {{ pasarguard_node_register_payload.data_limit }} bytes ({{ pg_node_data_limit_gb }} GB)"
+      - "default_timeout: {{ pasarguard_node_register_payload.default_timeout }}"
+      - "internal_timeout: {{ pasarguard_node_register_payload.internal_timeout }}"
+      - "proxy_url: {{ pasarguard_node_register_payload.proxy_url | default('null', true) }}"
+      - "on update omit: {{ pg_node_update_exclude_fields }}"
 
-- name: Register node in PasarGuard
+- name: Create node in PasarGuard
   ansible.builtin.uri:
     url: "{{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_node_register_path }}"
     method: POST
@@ -170,78 +297,86 @@
     body_format: json
     body: "{{ pasarguard_node_register_payload }}"
     validate_certs: "{{ pasarguard_validate_certs | bool }}"
-    status_code:
-      - 200
-      - 201
-      - 400
-      - 401
-      - 403
-      - 404
-      - 409
-      - 422
-      - 500
+    status_code: [200, 201, 400, 401, 403, 404, 409, 422, 500]
     return_content: true
     timeout: 20
   register: pasarguard_register_response
   delegate_to: localhost
   become: false
   no_log: true
+  when: pasarguard_node_target_id | length == 0
 
-- name: Fail with readable PasarGuard node registration error
+- name: Update node in PasarGuard
+  ansible.builtin.uri:
+    url: >-
+      {{ pasarguard_base_url | regex_replace('/+$', '') }}{{
+        pasarguard_node_update_path | replace('{node_id}', pasarguard_node_target_id)
+      }}
+    method: "{{ pasarguard_node_update_method }}"
+    headers:
+      Authorization: "Bearer {{ pasarguard_access_token }}"
+      Content-Type: "application/json"
+    body_format: json
+    body: "{{ pasarguard_node_update_payload }}"
+    validate_certs: "{{ pasarguard_validate_certs | bool }}"
+    status_code: [200, 201, 202, 400, 401, 403, 404, 422, 500]
+    return_content: true
+    timeout: 20
+  register: pasarguard_node_update_response
+  delegate_to: localhost
+  become: false
+  no_log: true
+  when: pasarguard_node_target_id | length > 0
+
+- name: Fail with readable PasarGuard node create error
   ansible.builtin.fail:
     msg: |
-      PasarGuard node registration failed.
+      PasarGuard node create failed.
+      URL: {{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_node_register_path }}
+      HTTP status: {{ pasarguard_register_response.status | default('NO_STATUS') }}
+      Response content: {{ pasarguard_register_response.content | default('NO_CONTENT') }}
+      name={{ pasarguard_node_register_payload.name }} core_config_id={{ pasarguard_node_register_payload.core_config_id }}
+      404 -> pasarguard_node_register_path.  400/422 -> имена полей payload.
+  when:
+    - pasarguard_node_target_id | length == 0
+    - pasarguard_register_response.status | default(0) | int not in [200, 201, 409]
 
-      URL:
-      {{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_node_register_path }}
+- name: Fail with readable PasarGuard node update error
+  ansible.builtin.fail:
+    msg: |
+      PasarGuard node update failed.
+      URL: {{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_node_update_path | replace('{node_id}', pasarguard_node_target_id) }}
+      HTTP status: {{ pasarguard_node_update_response.status | default('NO_STATUS') }}
+      Response content: {{ pasarguard_node_update_response.content | default('NO_CONTENT') }}
+      node_id={{ pasarguard_node_target_id }} (matched by name '{{ pasarguard_node_register_payload.name }}').
+      400/422 -> проверь pg_node_update_exclude_fields / имена полей.
+  when:
+    - pasarguard_node_target_id | length > 0
+    - pasarguard_node_update_response.status | default(0) | int not in [200, 201, 202]
 
-      HTTP status:
-      {{ pasarguard_register_response.status | default('NO_STATUS') }}
-
-      Response message:
-      {{ pasarguard_register_response.msg | default('NO_MSG') }}
-
-      Response content:
-      {{ pasarguard_register_response.content | default('NO_CONTENT') }}
-
-      Payload summary:
-        name={{ pasarguard_node_register_payload.name }}
-        address={{ pasarguard_node_register_payload.address }}
-        port={{ pasarguard_node_register_payload.port }}
-        connection_type={{ pasarguard_node_register_payload.connection_type }}
-        core_config_id={{ pasarguard_node_register_payload.core_config_id }}
-        keep_alive={{ pasarguard_node_register_payload.keep_alive }}
-        usage_coefficient={{ pasarguard_node_register_payload.usage_coefficient }}
-        api_key_present={{ (pasarguard_node_register_payload.api_key | length > 0) | ternary('yes', 'no') }}
-        server_ca_present={{ (pasarguard_node_register_payload.server_ca | length > 0) | ternary('yes', 'no') }}
-
-      If this is 404/405, check:
-        pasarguard_node_register_path
-
-      If this is 400/422, check payload field names expected by PasarGuard backend.
-  when: pasarguard_register_response.status | default(0) | int not in [200, 201, 409]
-
-- name: Save PasarGuard registration status fact
+- name: Save PasarGuard status fact
   ansible.builtin.set_fact:
     pasarguard_register_status_text: >-
-      registered, http_status={{ pasarguard_register_response.status }},
-      url={{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_node_register_path }}
+      {{
+        ('updated, node_id=' ~ pasarguard_node_target_id ~ ', http_status=' ~ pasarguard_node_update_response.status)
+        if (pasarguard_node_target_id | length > 0)
+        else (
+          ('registered' if (pasarguard_register_response.status | int in [200, 201]) else 'already exists')
+          ~ ', http_status=' ~ pasarguard_register_response.status
+        )
+      }}
 
-- name: Print PasarGuard registration status
+- name: Print PasarGuard result
   ansible.builtin.debug:
     msg:
-      - "PasarGuard node registration completed"
-      - "HTTP status: {{ pasarguard_register_response.status }}"
-      - "URL: {{ pasarguard_base_url | regex_replace('/+$', '') }}{{ pasarguard_node_register_path }}"
-      - "Address: {{ pasarguard_node_register_payload.address }}"
-      - "Name: {{ pasarguard_node_register_payload.name }}"
-      - "Port: {{ pasarguard_node_register_payload.port }}"
-      - "Connection type: {{ pasarguard_node_register_payload.connection_type }}"
-      - "server_ca was sent: {{ (pasarguard_node_register_payload.server_ca | length > 0) | ternary('yes', 'no') }}"
+      - "PasarGuard node {{ 'update (PUT)' if (pasarguard_node_target_id | length > 0) else 'create (POST)' }} completed"
+      - "Status: {{ pasarguard_register_status_text }}"
+      - "name: {{ pasarguard_node_register_payload.name }}"
+      - "core_config_id: {{ pasarguard_node_register_payload.core_config_id }}"
+      - "keep_alive: {{ pasarguard_node_register_payload.keep_alive }}"
+      - "api_port: {{ pasarguard_node_register_payload.api_port | default('not sent') }}"
 
-- name: Print PasarGuard registration response
+- name: Print PasarGuard raw response
   ansible.builtin.debug:
-    var: pasarguard_register_response.json
-  when:
-    - pasarguard_debug_http | bool
-    - pasarguard_register_response.json is defined
+    var: "{{ 'pasarguard_node_update_response' if (pasarguard_node_target_id | length > 0) else 'pasarguard_register_response' }}"
+  when: pasarguard_debug_http | bool

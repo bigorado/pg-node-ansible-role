@@ -8,3 +8,20 @@
   args:
     chdir: "{{ pg_node_app_dir }}"
   changed_when: true
+  when: pg_node_deploy_mode == "docker"
+
+- name: Restart pg node service
+  ansible.builtin.systemd:
+    name: "{{ pg_node_service_name }}"
+    state: restarted
+    daemon_reload: true
+  when: pg_node_deploy_mode == "systemd"
+
+- name: Restart pg node serviced
+  ansible.builtin.systemd:
+    name: "{{ pg_node_serviced_service_name }}"
+    state: restarted
+    daemon_reload: true
+  when:
+    - pg_node_install_serviced | bool
+    - pg_node_api_port | default('') | string | length > 0

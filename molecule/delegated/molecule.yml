@@ -1,0 +1,49 @@
+---
+# Integration scenario against a real, already-provisioned host.
+# The role is applied for real, so the run is NOT destroyed automatically.
+#
+#   molecule converge   -s delegated
+#   molecule idempotence -s delegated
+#   molecule verify     -s delegated
+#   molecule destroy    -s delegated      # tears the node back down
+#
+# Target host / user are overridable via env:
+#   PG_NODE_TEST_HOST=192.168.50.126 PG_NODE_TEST_USER=deploy
+#   PG_NODE_DEPLOY_MODE=systemd            # test the native/systemd path
+dependency:
+  name: galaxy
+driver:
+  name: default
+platforms:
+  - name: pg-node-remote
+    groups:
+      - pg_nodes
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      interpreter_python: auto_silent
+      host_key_checking: false
+      callbacks_enabled: profile_tasks
+    ssh_connection:
+      pipelining: true
+  inventory:
+    hosts:
+      all:
+        hosts:
+          pg-node-remote:
+            ansible_host: "${PG_NODE_TEST_HOST:-192.168.50.126}"
+            ansible_user: "${PG_NODE_TEST_USER:-deploy}"
+            ansible_connection: "${PG_NODE_TEST_CONNECTION:-ssh}"
+            ansible_become: true
+            ansible_become_method: sudo
+            ansible_python_interpreter: /usr/bin/python3
+verifier:
+  name: ansible
+scenario:
+  # No create/destroy in the default flow - this is a live host.
+  test_sequence:
+    - dependency
+    - converge
+    - idempotence
+    - verify

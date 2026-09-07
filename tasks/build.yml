@@ -1,0 +1,71 @@
+---
+- name: Install native build packages (Debian/Ubuntu)
+  ansible.builtin.apt:
+    name: "{{ pg_node_build_packages }}"
+    state: present
+    update_cache: true
+  when: ansible_os_family == "Debian"
+
+- name: Map architecture for Go toolchain download
+  ansible.builtin.set_fact:
+    pg_node_go_arch: "{{ pg_node_go_arch_map[ansible_architecture] | default('amd64') }}"
+  vars:
+    pg_node_go_arch_map:
+      x86_64: amd64
+      aarch64: arm64
+      armv7l: armv6l
+      armv6l: armv6l
+
+- name: Check current Go version
+  ansible.builtin.command: "{{ pg_node_go_dir }}/bin/go version"
+  register: pg_node_go_version_check
+  changed_when: false
+  failed_when: false
+
+- name: Parse current Go version
+  ansible.builtin.set_fact:
+    pg_node_go_current: "{{ pg_node_go_version_check.stdout | regex_search('[0-9]+\\.[0-9]+\\.[0-9]+') | default('0.0.0', true) }}"
+
+- name: Decide whether Go toolchain must be installed
+  ansible.builtin.set_fact:
+    pg_node_go_need_install: >-
+      {{
+        pg_node_go_install | bool
+        and (pg_node_go_current is version(pg_node_go_min_version, '<'))
+      }}
+
+- name: Show Go toolchain decision
+  ansible.builtin.debug:
+    msg:
+      - "Current Go: {{ pg_node_go_current }}"
+      - "Required Go: >= {{ pg_node_go_min_version }}"
+      - "Install Go {{ pg_node_go_version }}: {{ pg_node_go_need_install }}"
+
+- name: Download Go toolchain
+  ansible.builtin.get_url:
+    url: "{{ pg_node_go_download_base }}/go{{ pg_node_go_version }}.linux-{{ pg_node_go_arch }}.tar.gz"
+    dest: "/tmp/go{{ pg_node_go_version }}.linux-{{ pg_node_go_arch }}.tar.gz"
+    mode: "0644"
+  when: pg_node_go_need_install | bool
+
+- name: Remove previous Go toolchain
+  ansible.builtin.file:
+    path: "{{ pg_node_go_dir }}"
+    state: absent
+  when: pg_node_go_need_install | bool
+
+- name: Unpack Go toolchain into /usr/local
+  ansible.builtin.unarchive:
+    src: "/tmp/go{{ pg_node_go_version }}.linux-{{ pg_node_go_arch }}.tar.gz"
+    dest: /usr/local
+    remote_src: true
+  when: pg_node_go_need_install | bool
+
+- name: Validate Go toolchain
+  ansible.builtin.command: "{{ pg_node_go_dir }}/bin/go version"
+  register: pg_node_go_final
+  changed_when: false
+
+- name: Show Go toolchain
+  ansible.builtin.debug:
+    msg: "{{ pg_node_go_final.stdout | trim }}"

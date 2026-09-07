@@ -1,0 +1,176 @@
+---
+# node-serviced дёргает `pg-node core-update` / edit, которым нужен yq (mikefarah).
+# В репах Debian/Ubuntu годного `yq` нет — ставим бинарник с GitHub.
+- name: Ensure yq is installed (needed by pg-node CLI for core-update)
+  when: pg_node_install_yq | bool
+  block:
+    - name: Detect yq
+      ansible.builtin.command: "{{ pg_node_yq_bin_path }} --version"
+      register: pg_node_yq_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install yq binary (mikefarah/yq)
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/mikefarah/yq/releases/{{
+            'latest/download' if pg_node_yq_version == 'latest'
+            else 'download/' ~ pg_node_yq_version
+          }}/yq_linux_{{ pg_node_yq_arch_map[ansible_architecture] | default('amd64') }}
+        dest: "{{ pg_node_yq_bin_path }}"
+        owner: root
+        group: root
+        mode: "0755"
+      vars:
+        pg_node_yq_arch_map:
+          x86_64: amd64
+          aarch64: arm64
+          armv7l: arm
+          armv6l: arm
+      when: pg_node_yq_check.rc != 0 or pg_node_yq_version != "latest"
+
+- name: Map architecture for node-serviced asset
+  ansible.builtin.set_fact:
+    pg_node_serviced_platform: "{{ pg_node_serviced_arch_map[ansible_architecture] | default('Linux_x86_64') }}"
+  vars:
+    pg_node_serviced_arch_map:
+      x86_64: Linux_x86_64
+      aarch64: Linux_arm64
+      armv7l: Linux_armv7
+      armv6l: Linux_armv6
+
+- name: Query node-serviced release tag
+  ansible.builtin.uri:
+    url: >-
+      https://api.github.com/repos/{{ pg_node_serviced_repo }}/releases/{{
+        'latest' if pg_node_serviced_version == 'latest'
+        else 'tags/' ~ pg_node_serviced_version
+      }}
+    return_content: true
+    headers:
+      Accept: "application/vnd.github+json"
+    status_code: [200]
+  register: pg_node_serviced_release
+
+- name: Resolve node-serviced version and asset URL
+  ansible.builtin.set_fact:
+    pg_node_serviced_tag: "{{ pg_node_serviced_release.json.tag_name }}"
+    pg_node_serviced_version_effective: "{{ pg_node_serviced_release.json.tag_name | regex_replace('^v', '') }}"
+    pg_node_serviced_asset_name: "node-serviced_{{ pg_node_serviced_release.json.tag_name | regex_replace('^v', '') }}_{{ pg_node_serviced_platform }}.tar.gz"
+
+- name: Collect matching asset URLs from release metadata
+  ansible.builtin.set_fact:
+    pg_node_serviced_asset_urls: >-
+      {{
+        pg_node_serviced_release.json.assets | default([])
+        | selectattr('name', 'equalto', pg_node_serviced_asset_name)
+        | map(attribute='browser_download_url')
+        | list
+      }}
+
+- name: Set node-serviced asset URL (metadata or conventional fallback)
+  ansible.builtin.set_fact:
+    pg_node_serviced_asset_url: >-
+      {{
+        pg_node_serviced_asset_urls[0]
+        if (pg_node_serviced_asset_urls | length > 0)
+        else (
+          'https://github.com/' ~ pg_node_serviced_repo
+          ~ '/releases/download/' ~ pg_node_serviced_tag
+          ~ '/' ~ pg_node_serviced_asset_name
+        )
+      }}
+
+- name: Show resolved node-serviced download
+  ansible.builtin.debug:
+    msg:
+      - "arch: {{ ansible_architecture }} -> {{ pg_node_serviced_platform }}"
+      - "tag: {{ pg_node_serviced_tag }}"
+      - "url: {{ pg_node_serviced_asset_url }}"
+
+- name: Check installed node-serviced binary
+  ansible.builtin.stat:
+    path: "{{ pg_node_serviced_bin_path }}"
+  register: pg_node_serviced_bin_stat
+
+- name: Install or refresh node-serviced binary
+  when: >-
+    pg_node_serviced_update | bool
+    or not pg_node_serviced_bin_stat.stat.exists
+  block:
+    - name: Create node-serviced download tempdir
+      ansible.builtin.tempfile:
+        state: directory
+        suffix: node-serviced
+      register: pg_node_serviced_tmp
+
+    - name: Download node-serviced archive
+      ansible.builtin.get_url:
+        url: "{{ pg_node_serviced_asset_url }}"
+        dest: "{{ pg_node_serviced_tmp.path }}/node-serviced.tar.gz"
+        mode: "0644"
+        timeout: 60
+
+    - name: Unpack node-serviced archive
+      ansible.builtin.unarchive:
+        src: "{{ pg_node_serviced_tmp.path }}/node-serviced.tar.gz"
+        dest: "{{ pg_node_serviced_tmp.path }}"
+        remote_src: true
+
+    - name: Install node-serviced binary
+      ansible.builtin.copy:
+        src: "{{ pg_node_serviced_tmp.path }}/node-serviced"
+        dest: "{{ pg_node_serviced_bin_path }}"
+        remote_src: true
+        owner: root
+        group: root
+        mode: "0755"
+      notify: Restart pg node serviced
+
+    - name: Remove node-serviced tempdir
+      ansible.builtin.file:
+        path: "{{ pg_node_serviced_tmp.path }}"
+        state: absent
+
+- name: Render node-serviced systemd unit
+  ansible.builtin.template:
+    src: pg-node-service.service.j2
+    dest: "/etc/systemd/system/{{ pg_node_serviced_service_name }}.service"
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart pg node serviced
+
+- name: Enable and start node-serviced
+  ansible.builtin.systemd:
+    name: "{{ pg_node_serviced_service_name }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Flush handlers after node-serviced changes
+  ansible.builtin.meta: flush_handlers
+
+- name: Read node-serviced state
+  ansible.builtin.command: "systemctl is-active {{ pg_node_serviced_service_name }}"
+  register: pg_node_serviced_active
+  changed_when: false
+  failed_when: false
+
+- name: Fail if node-serviced is not active
+  ansible.builtin.assert:
+    that:
+      - pg_node_serviced_active.stdout | trim == "active"
+    fail_msg: |
+      Service {{ pg_node_serviced_service_name }} is not active (state: {{ pg_node_serviced_active.stdout | trim }}).
+
+      Check manually:
+        systemctl status {{ pg_node_serviced_service_name }}
+        journalctl -u {{ pg_node_serviced_service_name }} -n 100 --no-pager
+
+- name: Show node-serviced info
+  ansible.builtin.debug:
+    msg:
+      - "node-serviced: {{ pg_node_serviced_bin_path }} ({{ pg_node_serviced_version_effective }})"
+      - "unit: {{ pg_node_serviced_service_name }} (active)"
+      - "API_PORT: {{ pg_node_api_port }}"

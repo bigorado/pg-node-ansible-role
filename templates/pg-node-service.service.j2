@@ -1,0 +1,19 @@
+[Unit]
+Description=PasarGuard Node Service API ({{ pg_node_app_name }})
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart={{ pg_node_serviced_bin_path }}
+WorkingDirectory={{ pg_node_app_dir }}
+Restart=on-failure
+RestartSec=5
+TimeoutStartSec=30
+TimeoutStopSec=10
+Environment="ENV_FILE={{ pg_node_app_dir }}/.env"
+Environment="APP_NAME={{ pg_node_app_name }}"
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+[Install]
+WantedBy=multi-user.target

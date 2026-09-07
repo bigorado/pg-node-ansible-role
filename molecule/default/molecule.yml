@@ -1,0 +1,48 @@
+---
+# Containerised scenario (docker-in-docker). Exercises pg_node_deploy_mode=docker
+# end to end: installs Docker inside the test container, renders compose/.env,
+# pulls the node image, starts the container, installs geodata and the CLI.
+#
+#   molecule test -s default
+#   PG_NODE_DEPLOY_MODE=systemd molecule test -s default   # native build + unit
+dependency:
+  name: galaxy
+driver:
+  name: docker
+platforms:
+  - name: pg-node-default
+    image: geerlingguy/docker-ubuntu2404-ansible:latest
+    pre_build_image: true
+    privileged: true
+    cgroupns_mode: host
+    command: ""
+    volumes:
+      - /sys/fs/cgroup:/sys/fs/cgroup:rw
+    tmpfs:
+      - /run
+      - /tmp
+provisioner:
+  name: ansible
+  config_options:
+    defaults:
+      interpreter_python: auto_silent
+      callbacks_enabled: profile_tasks
+  inventory:
+    host_vars:
+      pg-node-default:
+        # ifconfig.io is unreachable from dind reliably; pin the "public" IP.
+        pg_node_public_ip: "203.0.113.10"
+        pg_node_cert_dns_names:
+          - node.test.local
+verifier:
+  name: ansible
+scenario:
+  test_sequence:
+    - dependency
+    - destroy
+    - create
+    - prepare
+    - converge
+    - idempotence
+    - verify
+    - destroy

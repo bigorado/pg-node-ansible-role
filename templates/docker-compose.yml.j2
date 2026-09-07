@@ -10,4 +10,7 @@ services:
     env_file: .env
     volumes:
       - {{ pg_node_data_dir }}:{{ pg_node_data_dir }}
+{% if pg_node_install_geodat | bool and not (pg_node_geodat_dir == pg_node_data_dir or pg_node_geodat_dir.startswith(pg_node_data_dir ~ '/')) %}
+      - {{ pg_node_geodat_dir }}:{{ pg_node_geodat_dir }}:ro
+{% endif %}
       - /etc/letsencrypt:/etc/letsencrypt:ro

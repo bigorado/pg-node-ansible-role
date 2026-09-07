@@ -1,0 +1,21 @@
+[Unit]
+Description=PasarGuard Node
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User={{ pg_node_service_user }}
+Group={{ pg_node_service_group }}
+WorkingDirectory={{ pg_node_app_dir }}
+ExecStart={{ pg_node_bin_path }}
+Restart=on-failure
+RestartSec=5s
+LimitNOFILE=1048576
+{% if pg_node_install_xray | bool %}
+Environment=XRAY_EXECUTABLE_PATH={{ pg_node_xray_executable_path }}
+{% endif %}
+Environment=XRAY_ASSETS_PATH={{ pg_node_xray_assets_path_effective | trim }}
+
+[Install]
+WantedBy=multi-user.target

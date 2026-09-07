@@ -1,0 +1,6 @@
+---
+# Live host - nothing to create.
+- name: Create
+  hosts: localhost
+  gather_facts: false
+  tasks: []

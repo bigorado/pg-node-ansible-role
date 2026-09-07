@@ -1,4 +1,9 @@
 ---
+- name: Disable Docker install in systemd deploy mode
+  ansible.builtin.set_fact:
+    pg_node_install_docker: false
+  when: pg_node_deploy_mode == "systemd"
+
 - name: Install base packages on Debian/Ubuntu
   ansible.builtin.apt:
     name: "{{ pg_node_base_packages }}"

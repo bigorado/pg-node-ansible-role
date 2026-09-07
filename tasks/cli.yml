@@ -1,0 +1,58 @@
+---
+- name: Ensure yq is installed (pg-node CLI needs it for core-update / edit)
+  when: pg_node_install_yq | bool
+  block:
+    - name: Detect yq
+      ansible.builtin.command: "{{ pg_node_yq_bin_path }} --version"
+      register: pg_node_yq_check
+      changed_when: false
+      failed_when: false
+
+    - name: Install yq binary (mikefarah/yq)
+      ansible.builtin.get_url:
+        url: >-
+          https://github.com/mikefarah/yq/releases/{{
+            'latest/download' if pg_node_yq_version == 'latest'
+            else 'download/' ~ pg_node_yq_version
+          }}/yq_linux_{{ pg_node_yq_arch_map[ansible_architecture] | default('amd64') }}
+        dest: "{{ pg_node_yq_bin_path }}"
+        owner: root
+        group: root
+        mode: "0755"
+      vars:
+        pg_node_yq_arch_map:
+          x86_64: amd64
+          aarch64: arm64
+          armv7l: arm
+          armv6l: arm
+      when: pg_node_yq_check.rc != 0 or pg_node_yq_version != "latest"
+
+- name: Download PasarGuard node management CLI
+  ansible.builtin.get_url:
+    url: "{{ pg_node_cli_url }}"
+    dest: "{{ pg_node_cli_path }}"
+    owner: root
+    group: root
+    mode: "0755"
+    force: "{{ pg_node_cli_update | bool }}"
+  register: pg_node_cli_download
+
+- name: Validate downloaded CLI script syntax
+  ansible.builtin.command: "bash -n {{ pg_node_cli_path }}"
+  changed_when: false
+
+- name: Read installed CLI version
+  ansible.builtin.command: "{{ pg_node_cli_path }} version-script"
+  register: pg_node_cli_version
+  changed_when: false
+  failed_when: false
+
+- name: Show node management CLI info
+  ansible.builtin.debug:
+    msg:
+      - "Node management CLI: {{ pg_node_cli_path }}"
+      - "APP_NAME: {{ pg_node_app_name }}"
+      - "Version: {{ pg_node_cli_version.stdout | default('unknown') | trim }}"
+      - >-
+        Commands: {{ pg_node_app_name }}
+        {up|down|restart|status|logs|update|core-update|edit|edit-env}

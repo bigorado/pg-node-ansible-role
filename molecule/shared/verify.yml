@@ -1,0 +1,228 @@
+---
+# Shared assertions for every scenario. Symlinked / imported by each
+# scenario's verify.yml. Works for both pg_node_deploy_mode values.
+- name: Verify
+  hosts: all
+  become: true
+  gather_facts: true
+  vars:
+    pg_node_deploy_mode: "{{ lookup('env', 'PG_NODE_DEPLOY_MODE') | default('docker', true) }}"
+    pg_node_app_dir: /opt/pg-node
+    pg_node_data_dir: /var/lib/pg-node
+    pg_node_certs_dir: /var/lib/pg-node/certs
+    pg_node_geodat_dir: /var/lib/pg-node/xray-assets
+    pg_node_service_name: pg-node
+    pg_node_serviced_service_name: pg-node-service
+    pg_node_cli_path: /usr/local/bin/pg-node
+    pg_node_service_port: 62050
+    pg_node_api_port: 62051
+    pg_node_api_key_regex: '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+  tasks:
+    # --- common: env + certificate ------------------------------------------
+    - name: Stat .env
+      ansible.builtin.stat:
+        path: "{{ pg_node_app_dir }}/.env"
+      register: env_stat
+
+    - name: Slurp .env
+      ansible.builtin.slurp:
+        path: "{{ pg_node_app_dir }}/.env"
+      register: env_slurp
+
+    - name: Parse .env
+      ansible.builtin.set_fact:
+        env_content: "{{ env_slurp.content | b64decode }}"
+
+    - name: Assert .env content
+      ansible.builtin.assert:
+        that:
+          - env_stat.stat.exists
+          - env_content is search('SERVICE_PORT\s*=\s*' ~ pg_node_service_port)
+          - env_content is search('API_KEY\s*=\s*[0-9a-fA-F-]{36}')
+          - env_content is search('SSL_CERT_FILE\s*=\s*' ~ pg_node_certs_dir)
+        fail_msg: "Bad .env:\n{{ env_content }}"
+
+    - name: Stat certificate and key
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      register: cert_stats
+      loop:
+        - "{{ pg_node_certs_dir }}/ssl_cert.pem"
+        - "{{ pg_node_certs_dir }}/ssl_key.pem"
+
+    - name: Assert certificate and key exist and are non-empty
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.size > 0
+        fail_msg: "Missing or empty: {{ item.item }}"
+      loop: "{{ cert_stats.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Read certificate SAN
+      ansible.builtin.command: "openssl x509 -in {{ pg_node_certs_dir }}/ssl_cert.pem -noout -text"
+      register: cert_text
+      changed_when: false
+
+    - name: Assert certificate has IP and localhost SAN
+      ansible.builtin.assert:
+        that:
+          - "'DNS:localhost' in cert_text.stdout"
+          - "'IP Address:127.0.0.1' in cert_text.stdout"
+
+    # --- common: geodata ---------------------------------------------------
+    - name: Stat geodata files
+      ansible.builtin.stat:
+        path: "{{ pg_node_geodat_dir }}/{{ item }}"
+      register: geo_stats
+      loop:
+        - geoip.dat
+        - geosite.dat
+
+    - name: Assert geodata files present and non-trivial
+      ansible.builtin.assert:
+        that:
+          - item.stat.exists
+          - item.stat.size > 100000
+        fail_msg: "Geodata file missing/too small: {{ item.item }} ({{ item.stat.size | default('absent') }})"
+      loop: "{{ geo_stats.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: Assert XRAY_ASSETS_PATH points at geodata dir
+      ansible.builtin.assert:
+        that:
+          - env_content is search('XRAY_ASSETS_PATH\s*=\s*' ~ (pg_node_geodat_dir | regex_escape))
+
+    # --- port listening --------------------------------------------------
+    - name: Assert node port is accepting connections
+      ansible.builtin.wait_for:
+        host: 127.0.0.1
+        port: "{{ pg_node_service_port }}"
+        state: started
+        timeout: 30
+
+    # --- node-serviced (API_PORT) ----------------------------------------
+    - name: node-serviced checks
+      block:
+        - name: Assert API_PORT is in .env
+          ansible.builtin.assert:
+            that:
+              - env_content is search('API_PORT\s*=\s*' ~ pg_node_api_port)
+
+        - name: Stat node-serviced binary and unit
+          ansible.builtin.stat:
+            path: "{{ item }}"
+          register: serviced_stats
+          loop:
+            - "/usr/local/bin/{{ pg_node_serviced_service_name }}"
+            - "/etc/systemd/system/{{ pg_node_serviced_service_name }}.service"
+
+        - name: Assert node-serviced binary and unit exist
+          ansible.builtin.assert:
+            that:
+              - item.stat.exists
+            fail_msg: "Missing: {{ item.item }}"
+          loop: "{{ serviced_stats.results }}"
+          loop_control:
+            label: "{{ item.item }}"
+
+        - name: Read node-serviced state
+          ansible.builtin.command: "systemctl is-active {{ pg_node_serviced_service_name }}"
+          register: serviced_active
+          changed_when: false
+          failed_when: false
+
+        - name: Assert node-serviced is active
+          ansible.builtin.assert:
+            that:
+              - serviced_active.stdout | trim == "active"
+            fail_msg: "{{ pg_node_serviced_service_name }} is {{ serviced_active.stdout | trim }}"
+
+        - name: Assert API port is accepting connections
+          ansible.builtin.wait_for:
+            host: 127.0.0.1
+            port: "{{ pg_node_api_port }}"
+            state: started
+            timeout: 30
+
+    # --- docker deploy mode --------------------------------------------------
+    - name: Docker-mode checks
+      when: pg_node_deploy_mode == "docker"
+      block:
+        - name: Stat docker-compose.yml
+          ansible.builtin.stat:
+            path: "{{ pg_node_app_dir }}/docker-compose.yml"
+          register: compose_stat
+
+        - name: Assert compose file exists
+          ansible.builtin.assert:
+            that:
+              - compose_stat.stat.exists
+
+        - name: Query node container
+          ansible.builtin.command: "docker inspect -f '{{ '{{' }}.State.Status{{ '}}' }}' node"
+          register: node_state
+          changed_when: false
+
+        - name: Assert container is running
+          ansible.builtin.assert:
+            that:
+              - node_state.stdout | trim == "running"
+            fail_msg: "Container 'node' state: {{ node_state.stdout | trim }}"
+
+        - name: Stat management CLI
+          ansible.builtin.stat:
+            path: "{{ pg_node_cli_path }}"
+          register: cli_stat
+
+        - name: Assert CLI installed and executable
+          ansible.builtin.assert:
+            that:
+              - cli_stat.stat.exists
+              - cli_stat.stat.mode is search('7..')
+
+    # --- systemd deploy mode ----------------------------------------------
+    - name: Systemd-mode checks
+      when: pg_node_deploy_mode == "systemd"
+      block:
+        - name: Stat systemd unit
+          ansible.builtin.stat:
+            path: "/etc/systemd/system/{{ pg_node_service_name }}.service"
+          register: unit_stat
+
+        - name: Stat node binary
+          ansible.builtin.stat:
+            path: "{{ pg_node_app_dir }}/pasarguard-node"
+          register: bin_stat
+
+        - name: Assert unit and binary exist
+          ansible.builtin.assert:
+            that:
+              - unit_stat.stat.exists
+              - bin_stat.stat.exists
+              - bin_stat.stat.size > 0
+
+        - name: Read service state
+          ansible.builtin.command: "systemctl is-active {{ pg_node_service_name }}"
+          register: svc_state
+          changed_when: false
+          failed_when: false
+
+        - name: Assert service is active
+          ansible.builtin.assert:
+            that:
+              - svc_state.stdout | trim == "active"
+            fail_msg: "Service {{ pg_node_service_name }} is {{ svc_state.stdout | trim }}"
+
+        - name: Assert xray binary installed
+          ansible.builtin.stat:
+            path: /usr/local/bin/xray
+          register: xray_stat
+
+        - name: Xray present
+          ansible.builtin.assert:
+            that:
+              - xray_stat.stat.exists

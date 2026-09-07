@@ -34,7 +34,10 @@
       or not pg_node_cert_stat.stat.exists
       or not pg_node_key_stat.stat.exists
       or pg_node_openssl_config_result.changed
-  notify: Restart pg node
+  notify:
+    - Restart pg node
+    - Restart pg node service
+    - Restart pg node serviced
 
 - name: Set certificate permissions
   ansible.builtin.file:

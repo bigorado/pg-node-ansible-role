@@ -1,0 +1,23 @@
+---
+- name: Prepare
+  hosts: all
+  become: true
+  gather_facts: false
+  tasks:
+    - name: Ensure /etc/docker exists
+      ansible.builtin.file:
+        path: /etc/docker
+        state: directory
+        mode: "0755"
+
+    # The test container's own rootfs is overlayfs, so the inner dockerd cannot
+    # use overlay2 (overlay-on-overlay = EINVAL on mount). vfs is slow but works
+    # in any nesting. Written before the role installs/starts Docker.
+    - name: Force vfs storage driver for the inner Docker
+      ansible.builtin.copy:
+        dest: /etc/docker/daemon.json
+        mode: "0644"
+        content: |
+          {
+            "storage-driver": "vfs"
+          }
